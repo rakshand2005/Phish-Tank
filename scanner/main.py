@@ -2,7 +2,7 @@
 Container Security Scanner — CLI Entry Point.
 
 Orchestrates the full scanning pipeline:
-    integrity → SBOM → CVE matching → layer attribution
+    integrity → SBOM → CVE matching → scoring → layer attribution
 
 Usage:
     scanner scan nginx:1.14
@@ -10,11 +10,11 @@ Usage:
     scanner scan nginx:1.14 --fail-on CRITICAL
     scanner integrity nginx:1.14
 """
-
+# ✅ BUG 1 FIXED: __future__ import is now the very first statement
 from __future__ import annotations
 
 import json
-import logging
+import logging   # ✅ BUG 2 FIXED: import logging is its own clean line
 import sys
 
 import click
@@ -30,6 +30,7 @@ from scanner.integrity import verify_image
 from scanner.sbom import generate_sbom, get_packages
 from scanner.matcher import check_db_freshness, update_db, scan_cves, parse_cve_matches
 from scanner.layers import get_layer_metadata, attribute_cves_to_layers, generate_fix_suggestions
+from scanner.scoring import enrich_and_score, gate_decision  # ✅ import at top, after __future__
 
 console = Console()
 logger = logging.getLogger("scanner")
@@ -98,7 +99,6 @@ def _print_integrity_results(result: ScanResult) -> None:
     for name, passed, warning in checks:
         status = Text("✅ PASS", style="green") if passed else Text("⚠️  WARN", style="yellow")
         details = warning or "OK"
-        # Truncate long details for table display
         if len(details) > 60:
             details = details[:57] + "..."
         table.add_row(name, status, details)
@@ -167,6 +167,8 @@ def _print_cve_table(result: ScanResult, show_layers: bool = False) -> None:
     table.add_column("Package", min_width=15)
     table.add_column("Installed", min_width=10)
     table.add_column("Fixed", min_width=10)
+    table.add_column("Priority", justify="center", min_width=10)  # ✅ new scoring column
+    table.add_column("KEV", justify="center", min_width=6)        # ✅ new KEV flag column
 
     if show_layers:
         table.add_column("Layer", style="dim", min_width=25)
@@ -175,12 +177,18 @@ def _print_cve_table(result: ScanResult, show_layers: bool = False) -> None:
         severity_text = Text(cve.severity, style=_severity_color(cve.severity))
         fixed = cve.fixed_version or Text("No fix", style="dim italic")
 
+        # ScoredCVE has priority_score and in_kev; CVEMatch falls back safely
+        priority = f"{cve.priority_score:.2f}" if hasattr(cve, "priority_score") else "—"
+        kev_flag = Text("YES", style="bold red") if getattr(cve, "in_kev", False) else Text("—", style="dim")
+
         row = [
             cve.cve_id,
             severity_text,
             cve.package,
             cve.installed_version,
             str(fixed),
+            priority,
+            kev_flag,
         ]
 
         if show_layers:
@@ -209,7 +217,7 @@ def _print_fix_suggestions(result: ScanResult) -> None:
         )
     )
 
-    for cve in fixable[:10]:  # Show top 10 suggestions
+    for cve in fixable[:10]:
         console.print(f"  [bold]{cve.cve_id}[/bold] ({cve.severity})")
         for line in cve.fix_suggestion.split("\n"):
             console.print(f"    {line}")
@@ -244,7 +252,7 @@ def _print_layer_breakdown(result: ScanResult) -> None:
     console.print()
 
 
-# ─── CLI Commands ───────────────────────────────────────────────────────
+# ─── CLI Commands ────────────────────────────────────────────────────────────
 
 @click.group()
 @click.version_option(version=__version__, prog_name="scanner")
@@ -264,11 +272,11 @@ def cli():
 @click.option("--update-db/--no-update-db", default=False,
               help="Update Trivy DB before scanning.")
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging.")
-def scan(image: str, output: str, fail_on: str, layers: bool, update_db_flag: bool, verbose: bool):
+def scan(image: str, output: str, fail_on: str, layers: bool, update_db: bool, verbose: bool):
     """
     Scan a Docker image for vulnerabilities.
 
-    Runs the full pipeline: integrity check → SBOM generation → CVE matching → layer attribution.
+    Runs the full pipeline: integrity → SBOM → CVE matching → scoring → layer attribution.
 
     Examples:
 
@@ -304,7 +312,7 @@ def scan(image: str, output: str, fail_on: str, layers: bool, update_db_flag: bo
     else:
         db_freshness = check_db_freshness()
 
-    if update_db_flag or db_freshness.is_stale:
+    if update_db or db_freshness.is_stale:
         if output == "terminal":
             with console.status("[bold cyan]Updating vulnerability database..."):
                 update_db()
@@ -331,6 +339,16 @@ def scan(image: str, output: str, fail_on: str, layers: bool, update_db_flag: bo
         trivy_json = scan_cves(image)
         cves = parse_cve_matches(trivy_json)
 
+    # ── Step 4.5: Risk Scoring (CVSS + EPSS + CISA KEV) ──
+    # ✅ BUG 3 + 4 FIXED: enrich_and_score is called HERE, inside scan(),
+    #    after cves exists, and gate_decision is also inside scan() so
+    #    it fires AFTER layer attribution — not at module level.
+    if output == "terminal":
+        with console.status("[bold cyan]Enriching CVEs with EPSS and CISA KEV scores..."):
+            cves = enrich_and_score(cves)
+    else:
+        cves = enrich_and_score(cves)
+
     # ── Step 5: Layer Attribution ──
     layer_infos = []
     if layers:
@@ -342,8 +360,7 @@ def scan(image: str, output: str, fail_on: str, layers: bool, update_db_flag: bo
                     cves = generate_fix_suggestions(cves, layer_infos)
                 except RuntimeError as e:
                     logger.warning("Layer analysis skipped: %s", e)
-                    if output == "terminal":
-                        console.print(f"  [yellow]⚠️  Layer analysis skipped: {e}[/yellow]\n")
+                    console.print(f"  [yellow]⚠️  Layer analysis skipped: {e}[/yellow]\n")
         else:
             try:
                 layer_infos = get_layer_metadata(image)
@@ -375,7 +392,6 @@ def scan(image: str, output: str, fail_on: str, layers: bool, update_db_flag: bo
         _print_layer_breakdown(result)
         _print_fix_suggestions(result)
 
-        # Final verdict
         if result.has_critical:
             console.print(
                 Panel(
@@ -393,12 +409,20 @@ def scan(image: str, output: str, fail_on: str, layers: bool, update_db_flag: bo
                 )
             )
 
-    # ── CI Gate ──
+    # ── CI Gate: priority-score based (replaces old severity-only gate) ──
+    exit_code, reason = gate_decision(cves)
+    if exit_code:
+        if output == "terminal":
+            console.print(
+                f"\n  [bold red]CI GATE BLOCKED: {reason}[/bold red]\n"
+            )
+        sys.exit(1)
+
+    # ── Legacy --fail-on gate (kept for backwards compatibility) ──
     if fail_on:
         severity_levels = ["CRITICAL", "HIGH", "MEDIUM", "LOW"]
         threshold_idx = severity_levels.index(fail_on)
         blocking_severities = set(severity_levels[: threshold_idx + 1])
-
         blocking_cves = [c for c in cves if c.severity in blocking_severities]
         if blocking_cves:
             if output == "terminal":
@@ -432,7 +456,6 @@ def integrity(image: str, verbose: bool):
     with console.status("[bold cyan]Running integrity checks..."):
         result = verify_image(image)
 
-    # Print results using a temporary ScanResult
     temp_result = ScanResult(
         image=image.split(":")[0],
         tag=image.split(":")[-1] if ":" in image else "latest",

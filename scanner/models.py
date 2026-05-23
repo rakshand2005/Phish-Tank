@@ -74,6 +74,10 @@ class CVEMatch:
     layer_command: Optional[str] = None
     description: str = ""
     fix_suggestion: Optional[str] = None
+    # Add to CVEMatch dataclass:
+    epss_score:     float = 0.0
+    in_kev:         bool  = False
+    priority_score: float = 0.0
 
     @property
     def is_fixable(self) -> bool:
