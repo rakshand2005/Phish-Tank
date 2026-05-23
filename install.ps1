@@ -1,15 +1,15 @@
 # ──────────────────────────────────────────────────────────────────
-# Container Security Scanner — Install Script (Windows PowerShell)
+# Phish Net — Install Script (Windows PowerShell)
 #
 # Usage:
-#   irm https://raw.githubusercontent.com/<your-repo>/main/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/rakshand2005/Phish-Tank/main/install.ps1 | iex
 # ──────────────────────────────────────────────────────────────────
 
-$Repo = "your-username/container-scanner"   # ← Change this to your GitHub username/repo
+$Repo = "rakshand2005/phish-tank"   # ← Using your GitHub username/repo
 $Image = "ghcr.io/${Repo}:latest"
 
 Write-Host ""
-Write-Host "🛡️  Container Security Scanner — Installer" -ForegroundColor Cyan
+Write-Host "🛡️  Phish Net — Installer" -ForegroundColor Cyan
 Write-Host "───────────────────────────────────────────" -ForegroundColor DarkGray
 Write-Host ""
 
@@ -24,14 +24,14 @@ Write-Host "📦 Pulling scanner image from GitHub Container Registry..." -Foreg
 docker pull $Image
 
 Write-Host ""
-Write-Host "🔧 Creating 'scanner' command..." -ForegroundColor Yellow
+Write-Host "🔧 Creating 'phishnet' command..." -ForegroundColor Yellow
 
 # Create PowerShell function
 $FunctionDef = @"
 
-# Container Security Scanner
-function scanner {
-    docker run --rm -v //var/run/docker.sock:/var/run/docker.sock $Image @args
+# Phish Net
+function phishnet {
+    docker run --rm -v //var/run/docker.sock:/var/run/docker.sock `$Image `@args
 }
 "@
 
@@ -43,7 +43,7 @@ if (-not (Test-Path $PROFILE)) {
 # Remove old function if it exists
 $ProfileContent = Get-Content $PROFILE -Raw -ErrorAction SilentlyContinue
 if ($ProfileContent) {
-    $ProfileContent = $ProfileContent -replace '(?ms)# Container Security Scanner\r?\nfunction scanner \{[^}]+\}\r?\n', ''
+    $ProfileContent = $ProfileContent -replace '(?ms)# Phish Net\r?\nfunction phishnet \{[^}]+\}\r?\n', ''
     Set-Content $PROFILE -Value $ProfileContent
 }
 
@@ -55,10 +55,11 @@ Write-Host ""
 Write-Host "✅ Installation complete!" -ForegroundColor Green
 Write-Host ""
 Write-Host "   Usage:" -ForegroundColor White
-Write-Host "     scanner scan nginx:1.14"
-Write-Host "     scanner scan nginx:1.14 --output json"
-Write-Host "     scanner scan nginx:1.14 --fail-on CRITICAL"
-Write-Host "     scanner integrity nginx:1.14"
+Write-Host "     phishnet scan nginx:1.14"
+Write-Host "     phishnet scan nginx:1.14 --output json"
+Write-Host "     phishnet scan nginx:1.14 --fail-on CRITICAL"
+Write-Host "     phishnet integrity nginx:1.14"
+Write-Host "     phishnet fix nginx:1.14"
 Write-Host ""
 Write-Host "   ⚠️  Restart your terminal or run: . `$PROFILE" -ForegroundColor Yellow
 Write-Host ""

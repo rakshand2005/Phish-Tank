@@ -1,18 +1,18 @@
 #!/bin/bash
 # ──────────────────────────────────────────────────────────────────
-# Container Security Scanner — Install Script (Linux / macOS)
+# Phish Net — Install Script (Linux / macOS)
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/<your-repo>/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/rakshand2005/Phish-Tank/main/install.sh | bash
 # ──────────────────────────────────────────────────────────────────
 
 set -e
 
-REPO="your-username/container-scanner"  # ← Change this to your GitHub username/repo
+REPO="rakshand2005/phish-tank"  # ← Using your GitHub username/repo
 IMAGE="ghcr.io/${REPO}:latest"
 
 echo ""
-echo "🛡️  Container Security Scanner — Installer"
+echo "🛡️  Phish Net — Installer"
 echo "───────────────────────────────────────────"
 echo ""
 
@@ -27,7 +27,7 @@ echo "📦 Pulling scanner image from GitHub Container Registry..."
 docker pull "${IMAGE}"
 
 echo ""
-echo "🔧 Creating 'scanner' command..."
+echo "🔧 Creating 'phishnet' command..."
 
 # Detect shell config file
 SHELL_CONFIG=""
@@ -40,16 +40,16 @@ elif [ -f "$HOME/.bash_profile" ]; then
 fi
 
 # Create the alias
-ALIAS_CMD="alias scanner='docker run --rm -v /var/run/docker.sock:/var/run/docker.sock ${IMAGE}'"
+ALIAS_CMD="alias phishnet='docker run --rm -v /var/run/docker.sock:/var/run/docker.sock ${IMAGE}'"
 
 if [ -n "$SHELL_CONFIG" ]; then
     # Remove old alias if it exists
-    grep -v "alias scanner=" "$SHELL_CONFIG" > "$SHELL_CONFIG.tmp" 2>/dev/null || true
+    grep -v "alias phishnet=" "$SHELL_CONFIG" > "$SHELL_CONFIG.tmp" 2>/dev/null || true
     mv "$SHELL_CONFIG.tmp" "$SHELL_CONFIG"
 
     # Add new alias
     echo "" >> "$SHELL_CONFIG"
-    echo "# Container Security Scanner" >> "$SHELL_CONFIG"
+    echo "# Phish Net" >> "$SHELL_CONFIG"
     echo "${ALIAS_CMD}" >> "$SHELL_CONFIG"
 
     echo "   Added to ${SHELL_CONFIG}"
@@ -62,10 +62,11 @@ echo ""
 echo "✅ Installation complete!"
 echo ""
 echo "   Usage:"
-echo "     scanner scan nginx:1.14"
-echo "     scanner scan nginx:1.14 --output json"
-echo "     scanner scan nginx:1.14 --fail-on CRITICAL"
-echo "     scanner integrity nginx:1.14"
+echo "     phishnet scan nginx:1.14"
+echo "     phishnet scan nginx:1.14 --output json"
+echo "     phishnet scan nginx:1.14 --fail-on CRITICAL"
+echo "     phishnet integrity nginx:1.14"
+echo "     phishnet fix nginx:1.14"
 echo ""
 echo "   ⚠️  Restart your terminal or run: source ${SHELL_CONFIG}"
 echo ""
