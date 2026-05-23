@@ -20,7 +20,7 @@ dependencies = [
 ]
 
 [project.scripts]
-scanner = "scanner.main:main"
+phishnet = "scanner.main:main"
 
 [tool.setuptools.packages.find]
 include = ["scanner*"]

@@ -419,7 +419,7 @@ def _print_layer_breakdown(result: ScanResult) -> None:
 # ─── CLI Commands ────────────────────────────────────────────────────────────
 
 @click.group()
-@click.version_option(version=__version__, prog_name="scanner")
+@click.version_option(version=__version__, prog_name="phishnet")
 def cli():
     """🛡️  Container Security Scanner — SBOM Generation & CVE Matching"""
     pass
