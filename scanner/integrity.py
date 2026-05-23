@@ -30,6 +30,8 @@ POPULAR_IMAGES = [
     "cassandra", "couchdb", "influxdb", "telegraf", "chronograf",
     "tomcat", "jetty", "maven", "gradle", "eclipse-temurin",
     "amazoncorretto", "rust", "swift", "dotnet", "aspnet",
+    "gcr.io", "quay.io", "ghcr.io", "public.ecr.aws", "bitnami", 
+    "rancher", "chainguard", "hashicorp", "minio", "library"
 ]
 
 
