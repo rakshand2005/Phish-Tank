@@ -1,73 +1,108 @@
-# 🛡️ Container Security Scanner — Threat Model & Defenses
+# 🛡️ Threat Model Write-Up
+## Security Analysis & Risk Assessment
+**v0.1.0 — Team 15**
 
-This document outlines the threat model for our Container Security Scanner. It details the specific supply chain attacks and vulnerabilities our tool detects, how we mitigate them, and the relevant MITRE ATT&CK mappings.
+### Executive Summary
+**Phish Net** is a supply-chain security tool for Docker container images. It occupies a privileged position in a CI/CD pipeline: it has access to the Docker socket, makes outbound network calls to vulnerability databases, and its output directly gates production deployments. This threat model identifies six specific supply-chain attack scenarios the tool defends against, maps each to MITRE ATT&CK techniques, details the implemented defenses, and documents residual risks and recommendations.
 
----
-
-## 1. Supply Chain Compromise (The "SolarWinds" Scenario)
-**MITRE ATT&CK ID:** [T1195.001](https://attack.mitre.org/techniques/T1195/001/) (Compromise Software Dependencies and Development Tools)
-
-**The Threat:** An attacker compromises a legitimate publisher's build server (CI/CD pipeline) or source code repository. They inject a malicious backdoor during compilation. The publisher unknowingly signs the compromised image with their official key and distributes it.
-
-**Our Defense (SLSA Provenance via Cosign):**
-- Standard image signatures (`cosign verify`) are **not enough** to catch this, because the publisher's key is what signed the backdoor.
-- Our tool enforces **SBOM Attestations** (`cosign verify-attestation`). 
-- We check for a cryptographically signed receipt of the *exact ingredients and build environment* (SLSA Provenance). If an attacker sneaks a backdoor in during the build, the final image won't match the attested build materials, and our tool flags the discrepancy as a severe supply chain failure.
+### Scope
+- The Phish Net scanner CLI and all modules in `scanner/` including the new `remediate.py`.
+- External data dependencies: Docker Hub API, Trivy vulnerability DB, EPSS API (FIRST.org), CISA KEV feed, Cosign/Sigstore infrastructure.
+- The execution environment: CI runner or developer workstation with Docker socket access.
+- **Out of scope:** vulnerabilities in the scanned images themselves (that is the tool's output, not its attack surface).
 
 ---
 
-## 2. Supply Chain Tag Poisoning (Silent Overwrite)
-**MITRE ATT&CK ID:** [T1195.002](https://attack.mitre.org/techniques/T1195/002/) (Compromise Software Supply Chain: Compromise Software Supply Chain)
+### MITRE ATT&CK Mapping
 
-**The Threat:** An attacker compromises a publisher's Docker Hub account and overwrites an existing, widely-used image tag (e.g., pushing a malicious image to `redis:7.0.11`). Because developers rely on tags instead of immutable digests, the next `docker pull` silently fetches the malicious image.
-
-**Our Defense (Tag Poisoning Detection):**
-- Our `integrity.py` module resolves the local SHA-256 digest of what the developer *originally* pulled.
-- It then queries the OCI Registry API for the *current* digest of that same tag.
-- **If the digests differ**, it means the tag was silently overwritten on the registry. Our tool immediately blocks the pipeline and alerts the user to "Digest Drift" — a massive red flag for tag poisoning.
-- We also actively warn users to use **Digest Pinning** (`@sha256:...`) instead of mutable tags.
-
----
-
-## 3. Fake Version Tag Injection
-**The Threat:** An attacker registers a plausible-sounding but completely fabricated version tag (e.g., `nginx:1.999.0` or `python:3.11.99`) and tricks a developer into pulling it via social engineering or a compromised `package.json` / `Dockerfile`.
-
-**Our Defense (Syntactic Fake-Tag Detection):**
-- Our tool queries the Docker Hub API for the specific tag provided by the user.
-- If the registry returns a 404, we know the version string is entirely fabricated. 
-- The tool flags this as a "Fake Version Tag" and blocks execution, preventing the developer from pulling a shadow dependency.
+| Technique ID | Technique Name | Threat Scenario |
+|--------------|----------------|-----------------|
+| **T1195.001** | Supply Chain Compromise: Software Dependencies | Scenarios 1 and 5 - compromised build, known CVEs |
+| **T1195.002** | Supply Chain Compromise: Supply Chain | Scenario 2 - silent tag overwrite (tag poisoning) |
+| **T1036** | Masquerading | Scenario 4 - typosquatting |
+| **T1036.005** | Match Legitimate Name or Location | Scenario 3 - fake version tags |
+| **T1553.002** | Subvert Trust Controls: Code Signing | Scenario 6 - unsigned publisher artifacts |
+| **T1190** | Exploit Public-Facing Application | Scenario 5 - known CVE exploitation |
 
 ---
 
-## 4. Typosquatting
-**MITRE ATT&CK ID:** [T1036](https://attack.mitre.org/techniques/T1036/) (Masquerading)
+### Threat Scenarios & Defenses
 
-**The Threat:** An attacker uploads a malicious image with a name very similar to a popular, legitimate image (e.g., `ngimx` instead of `nginx`, or `ubntu` instead of `ubuntu`), hoping developers make a typo in their Dockerfile.
+#### Scenario 1 - Supply Chain Compromise (The SolarWinds Scenario)
+- **Attack:** An attacker compromises a legitimate publisher's build server or source repository, injects a malicious backdoor during compilation, and the publisher unknowingly signs and distributes the compromised image with their official key.
+- **Why standard signature verification is insufficient:** `cosign verify` only proves the publisher signed the image - it cannot prove the image was built from unmodified source. The attacker's backdoor will carry a valid signature.
+- **Implemented defense - SLSA Provenance via `cosign verify-attestation`:**
+  - The tool checks for a cryptographically signed receipt of the exact build ingredients and environment (SLSA Provenance).
+  - If an attacker injects code during the build, the final image will not match the attested build materials, and the discrepancy is flagged as a severe supply-chain failure.
+- **Residual risk:** An attacker who compromises both the source repository and the SLSA attestation infrastructure could bypass this check. This is a systemic risk outside the project's control.
 
-**Our Defense (Levenshtein + Registry Validation):**
-- We compute the **Levenshtein edit distance** against a hardcoded list of the top 50 most popular Docker images. If an image name is 1 or 2 characters off from a popular image, we raise a high-risk Typosquat warning.
-- We also perform **Live Registry Validation** to ensure the namespace/repo actually exists, catching blatant masquerades before they are pulled.
+#### Scenario 2 - Tag Poisoning (Silent Overwrite)
+- **Attack:** An attacker compromises a publisher's Docker Hub account and overwrites an existing, widely-used tag (e.g., `redis:7.0.11`) with a malicious image. The next `docker pull` silently fetches the malicious version because developers rely on mutable tags.
+- **Implemented defense - Digest Drift Detection:**
+  - `integrity.py` resolves the local SHA-256 digest of what was originally pulled.
+  - It then queries the OCI Registry API for the current digest of that same tag.
+  - A digest mismatch immediately blocks the pipeline and alerts the user to Digest Drift.
+  - Users are also actively warned to use digest pinning (`@sha256:...`) instead of mutable tags.
+- **Residual risk:** A first-time pull of a poisoned tag has no previous digest to compare against. **Mitigation:** pin images to digests from the first pull and store the pinned reference in version control.
+
+#### Scenario 3 - Fake Version Tag Injection
+- **Attack:** An attacker registers a plausible but entirely fabricated version tag (e.g., `nginx:1.999.0` or `python:3.11.99`) and tricks a developer into pulling it via social engineering or a compromised Dockerfile.
+- **Implemented defense:**
+  - The tool queries the Docker Hub API for the specific tag provided.
+  - A 404 response proves the version string is fabricated - the tool flags this as a Fake Version Tag and blocks execution before any pull occurs.
+
+#### Scenario 4 - Typosquatting
+- **Attack:** An attacker uploads a malicious image with a name one or two characters off from a popular official image (e.g., `ngimx` instead of `nginx`, or `ubntu` instead of `ubuntu`), hoping developers make a typo.
+- **Implemented defense - Levenshtein Distance + Live Registry Validation:**
+  - Levenshtein edit distance is computed against a curated list of 50+ popular Docker Hub images. A distance of 1 or 2 raises a Typosquat Warning.
+  - A live Docker Hub API lookup confirms whether the image namespace/repo actually exists.
+  - If `typosquat_risk` is True, the CLI prompts the user for interactive confirmation before continuing.
+- **Residual risk:** A typosquatted image that the attacker has successfully registered on Docker Hub will pass the registry check. **Mitigation:** always use digest pinning.
+
+#### Scenario 5 - Exploitation of Known Vulnerabilities
+- **Attack:** The container image contains outdated OS packages or application dependencies with publicly known CVEs. Attackers scan for these to gain initial access or escalate privileges.
+- **Implemented defense - Trivy + EPSS + CISA KEV:**
+  - A CycloneDX SBOM is generated and cross-referenced against the Trivy vulnerability database (auto-refreshed if >24 h stale to prevent window-of-opportunity attacks).
+  - Every CVE is enriched with EPSS (statistical probability of exploitation in the next 30 days) and the CISA KEV flag (currently being actively exploited by nation-state actors or ransomware).
+  - A composite `priority_score` (0-10) replaces reliance on theoretical CVSS scores alone, blocking only CVEs that represent real and immediate risk.
+  - Layer attribution identifies which specific Dockerfile instruction introduced each vulnerable package, enabling targeted fixes.
+  - The new `scanner fix` command auto-generates a patched Dockerfile with base image upgrades and pinned package versions.
+
+#### Scenario 6 - Unsigned Publisher Artifacts
+- **Attack:** An attacker uploads an image masquerading as a legitimate publisher. Because the image is unsigned, there is no cryptographic proof of publisher identity.
+- **Implemented defense - Cosign Signature Verification:**
+  - `cosign verify` is run before scanning, tying the image to the trusted publisher's public key or OIDC identity via Sigstore's keyless transparency log.
+  - An unsigned image triggers a warning. The scan continues (to still report CVEs) but the unsigned status is prominently flagged in the report.
+- **Residual risk:** Compromise of the Sigstore root of trust. Systemic risk outside project control.
 
 ---
 
-## 5. Exploitation of Known Vulnerabilities
-**MITRE ATT&CK ID:** [T1190](https://attack.mitre.org/techniques/T1190/) (Exploit Public-Facing Application)
+### Additional Attack Surface: The Scanner Itself
 
-**The Threat:** The container image contains outdated OS packages (e.g., `apt`, `apk`) or application dependencies (e.g., `pip`, `npm`) that have publicly known vulnerabilities (CVEs). Attackers scan for these CVEs to gain initial access or escalate privileges.
+#### Docker Socket Exposure
+The scanner mounts `/var/run/docker.sock`, which grants root-equivalent access to the host.
+- **Implemented mitigations:** only `docker.images.pull()` and `docker.api.inspect_image()` are called - no containers are started or modified.
+- **Recommendation:** add `USER scanner` (non-root) to the Dockerfile.
 
-**Our Defense (Trivy + EPSS + CISA KEV):**
-- We generate a CycloneDX SBOM and cross-reference it against the Trivy vulnerability database (which we automatically keep fresh to prevent stale scans).
-- **Risk Scoring:** Instead of relying solely on theoretical CVSS scores, our `scoring.py` module enriches every CVE with:
-  - **EPSS (Exploit Prediction Scoring System):** The statistical probability that the CVE will be exploited in the wild in the next 30 days.
-  - **CISA KEV (Known Exploited Vulnerabilities):** A binary flag indicating if nation-state actors or ransomware gangs are *actively* exploiting this vulnerability right now.
-- We compute a composite `priority_score` (0-10) and block the CI pipeline if any CVE exceeds the critical threshold, prioritizing actual threat intelligence over theoretical severity.
+#### Compromised EPSS or KEV Feed
+A MITM of the FIRST.org EPSS API or CISA KEV feed could suppress exploit scores.
+- **Mitigation:** both feeds are fetched over HTTPS with TLS validation. On network error, scores default conservatively (0.0 / empty set) - failure never suppresses a score.
+
+#### Gate Threshold Manipulation
+An insider could raise `GATE_THRESHOLD` to 10.0 so the CI gate never fires.
+- **Mitigation:** the constant is a named, auditable value at the top of `scoring.py`.
+- **Recommendation:** add a startup assertion validating `0 < GATE_THRESHOLD <= 10` and that scoring weights sum to 1.0.
 
 ---
 
-## 6. Unsigned Publisher Artifacts
-**The Threat:** An attacker uploads an image masquerading as a legitimate publisher, and developers pull it because they have no way to verify the cryptographic identity of the uploader.
+### Security Recommendations
 
-**Our Defense (Cosign Signature Verification):**
-- Before scanning, our tool enforces `cosign verify`.
-- This ensures the image has a valid cryptographic signature tying it to the trusted publisher's public key (or OIDC identity via Sigstore's keyless transparency log). 
-- If the image is unsigned, we warn the user that publisher identity cannot be established.
+| Priority | Recommendation | Module |
+|----------|----------------|--------|
+| **HIGH** | Add `USER scanner` (non-root) to Dockerfile | `Dockerfile` |
+| **HIGH** | Enforce HTTPS certificate pinning for EPSS and KEV URLs | `scoring.py` |
+| **MEDIUM** | Add startup assertion: weights sum to 1.0 and `0 < GATE_THRESHOLD <= 10` | `scoring.py` |
+| **MEDIUM** | Support digest-only image references in CI (reject mutable tags by default) | `integrity.py` |
+| **MEDIUM** | Publish SLSA provenance attestation for the scanner image itself | CI / `Dockerfile` |
+| **LOW** | Implement content-hash verification for downloaded Trivy DB | `matcher.py` |
+| **LOW** | Add retry with exponential back-off for EPSS/KEV API calls | `scoring.py` |
