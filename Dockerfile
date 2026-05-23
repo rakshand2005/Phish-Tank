@@ -32,7 +32,7 @@ RUN curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /
 RUN curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
 
 # ── Install Cosign (image signature verification) ──
-RUN COSIGN_VERSION=$(curl -sL https://api.github.com/repos/sigstore/cosign/releases/latest | grep '"tag_name"' | head -1 | cut -d'"' -f4) \
+RUN COSIGN_VERSION="v2.4.0" \
     && curl -Lo /usr/local/bin/cosign "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64" \
     && chmod +x /usr/local/bin/cosign
 
@@ -49,7 +49,7 @@ RUN pip install --no-cache-dir -e .
 
 # ── Pre-download Trivy vulnerability DB (optional, makes first scan faster) ──
 # Uncomment the next line to bake the DB into the image (adds ~150MB):
-# RUN trivy db update
+RUN trivy image --download-db-only
 
 # ── Entry point ──
 ENTRYPOINT ["scanner"]

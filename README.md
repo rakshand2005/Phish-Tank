@@ -14,12 +14,12 @@ A CLI tool that scans Docker images for vulnerabilities, generates a Software Bi
 
 **Linux / macOS:**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<your-repo>/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/rakshand2005/Phish-Tank/main/install.sh | bash
 ```
 
 **Windows (PowerShell):**
 ```powershell
-irm https://raw.githubusercontent.com/<your-repo>/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/rakshand2005/Phish-Tank/main/install.ps1 | iex
 ```
 
 ### Usage
@@ -31,8 +31,9 @@ scanner scan nginx:1.14
 # JSON output (for CI pipelines / downstream processing)
 scanner scan nginx:1.14 --output json
 
-# Block CI if critical CVEs found (exit code 1)
-scanner scan nginx:1.14 --fail-on CRITICAL
+# Block CI if priority score >= 7.0 (Custom scoring logic)
+# (Automatically applied, but --fail-on CRITICAL legacy flag still available)
+scanner scan nginx:1.14
 
 # Integrity check only (signature, typosquat, digest pinning)
 scanner integrity nginx:1.14
@@ -47,7 +48,7 @@ scanner fix nginx:1.14 --output-dir ./patched
 ```bash
 docker run --rm \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  ghcr.io/<your-repo>:latest \
+  ghcr.io/rakshand2005/Phish-Tank:latest \
   scan nginx:1.14
 ```
 
@@ -114,9 +115,10 @@ scanner/
 ├── sbom.py           # SBOM generation (Trivy)
 ├── matcher.py        # CVE matching + DB freshness
 ├── layers.py         # Layer attribution + fix suggestions
-├── scoring.py        # Risk scoring (CVSS + EPSS + CISA KEV)
+├── scoring.py        # Risk scoring (CVSS + EPSS + CISA KEV) + CI Gate logic
 ├── remediate.py      # 🔧 Auto-remediation Dockerfile generator
-└── models.py         # Shared data models (contract for P3/P4)
+├── models.py         # Shared data models (contract for P3/P4)
+└── tests/            # Test suite for integrity and scoring components
 ```
 
 ---
@@ -126,7 +128,7 @@ scanner/
 | Person | Module | Responsibility |
 |--------|--------|---------------|
 | **P1 (You)** | `integrity.py`, `sbom.py`, `matcher.py`, `layers.py` | SBOM + CVE + Layer Attribution |
-| **P3** | `scoring.py`, `gate.py` | Risk scoring + CI gate logic |
+| **P3** | `scoring.py` | Risk scoring + CI gate logic |
 | **P4** | `report.py` | Report output (JSON + terminal) |
 | **P5** | `.github/workflows/`, `Makefile` | Demo pipeline setup |
 
@@ -141,7 +143,7 @@ scanner/
 
 ```bash
 # Clone the repo
-git clone https://github.com/<your-repo>.git
+git clone https://github.com/rakshand2005/Phish-Tank.git
 cd container-scanner
 
 # Install Python dependencies
@@ -149,6 +151,9 @@ pip install -e .
 
 # Requirements: Docker running + Trivy + Cosign installed
 # (All included in the Dockerfile)
+
+# Run the test suite
+pytest tests/
 ```
 
 ### Build the Docker image locally:

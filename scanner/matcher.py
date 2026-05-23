@@ -110,7 +110,7 @@ def update_db() -> bool:
     logger.info("Updating Trivy vulnerability database...")
     try:
         result = subprocess.run(
-            ["trivy", "db", "update"],
+            ["trivy", "image", "--download-db-only"],
             capture_output=True,
             text=True,
             timeout=300,
@@ -148,12 +148,16 @@ def scan_cves(image_name: str) -> dict:
             [
                 "trivy", "image",
                 "--format", "json",
+                "--scanners", "vuln",
+                "--skip-db-update",
+                "--skip-java-db-update",
+                "--pkg-types", "os",
                 "--quiet",
                 image_name,
             ],
             capture_output=True,
             text=True,
-            timeout=300,
+            timeout=600,
         )
 
         if result.returncode != 0 and not result.stdout:

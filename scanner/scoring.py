@@ -93,6 +93,11 @@ class ScoredCVE:
     def blocks_ci(self) -> bool:
         return self.priority_score >= GATE_THRESHOLD
 
+    @property
+    def is_fixable(self) -> bool:
+        """True if a fixed version is available."""
+        return self.fixed_version is not None and self.fixed_version != ""
+
     def score_breakdown(self) -> str:
         """Human-readable score explanation for the report."""
         cvss_contrib = (self.cvss_score / 10) * W_CVSS * 10

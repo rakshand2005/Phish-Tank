@@ -48,13 +48,17 @@ def generate_sbom(image_name: str, output_dir: Optional[str] = None) -> dict:
             [
                 "trivy", "image",
                 "--format", "cyclonedx",
+                "--scanners", "vuln",
+                "--skip-db-update",
+                "--skip-java-db-update",
+                "--pkg-types", "os",
                 "--output", str(sbom_path),
                 "--quiet",
                 image_name,
             ],
             capture_output=True,
             text=True,
-            timeout=300,
+            timeout=600,
         )
 
         if result.returncode != 0:
@@ -84,7 +88,7 @@ def generate_sbom(image_name: str, output_dir: Optional[str] = None) -> dict:
             "Trivy not found. Install from: https://aquasecurity.github.io/trivy/"
         )
     except subprocess.TimeoutExpired:
-        raise RuntimeError("Trivy SBOM generation timed out after 300 seconds.")
+        raise RuntimeError("Trivy SBOM generation timed out after 600 seconds.")
 
 
 def get_packages(sbom: dict) -> list[Package]:
