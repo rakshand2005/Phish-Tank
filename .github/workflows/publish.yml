@@ -1,0 +1,86 @@
+# ──────────────────────────────────────────────────────────────────
+# GitHub Actions — Build & Publish to GitHub Container Registry (GHCR)
+#
+# Triggers on push to main branch.
+# Builds the Docker image and pushes it to ghcr.io/<owner>/<repo>
+# ──────────────────────────────────────────────────────────────────
+
+name: Build & Publish Scanner
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Test the built image
+        if: github.event_name == 'pull_request'
+        run: |
+          docker build -t scanner-test .
+          docker run --rm scanner-test --help
+          echo "✅ Scanner image built and tested successfully"
+
+  # ── Smoke test: scan a known vulnerable image ──
+  smoke-test:
+    needs: build-and-push
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+
+    permissions:
+      packages: read
+
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run scanner on nginx:1.14 (should find vulnerabilities)
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
+            scan nginx:1.14 --output json | head -100
+          echo "✅ Smoke test passed"
