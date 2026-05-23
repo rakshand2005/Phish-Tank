@@ -9,12 +9,14 @@ Performs pre-scan security checks on a Docker image:
 """
 
 from __future__ import annotations
+from scanner.models import IntegrityResult
+from typing import Optional
+
 
 import subprocess
 import logging
-from typing import Optional
+import requests
 
-from scanner.models import IntegrityResult
 
 logger = logging.getLogger(__name__)
 
@@ -30,9 +32,46 @@ POPULAR_IMAGES = [
     "cassandra", "couchdb", "influxdb", "telegraf", "chronograf",
     "tomcat", "jetty", "maven", "gradle", "eclipse-temurin",
     "amazoncorretto", "rust", "swift", "dotnet", "aspnet",
-    "gcr.io", "quay.io", "ghcr.io", "public.ecr.aws", "bitnami", 
-    "rancher", "chainguard", "hashicorp", "minio", "library"
 ]
+
+
+def verify_image_exists_on_registry(image_name: str) -> tuple[bool, str]:
+    """
+    Queries the official Docker Registry API to confirm if the namespace/image
+    is a real, registered public artifact or a non-existent typosquat.
+
+    Makes a live call to Docker Hub API. A 404 response proves the image
+    is fraudulent or typo-squatted. Falls back gracefully on network failure.
+
+    Args:
+        image_name: The full image reference (e.g., "nginx:1.14" or "user/repo").
+
+    Returns:
+        Tuple of (image_exists, message).
+    """
+    # Isolate registry elements: repo/name (strip tag and digest)
+    parts = image_name.split(":")[0].split("@")[0].split("/")
+    if len(parts) == 1:
+        namespace, repo = "library", parts[0]
+    else:
+        namespace, repo = parts[0], parts[1]
+
+    url = f"https://hub.docker.com/v2/repositories/{namespace}/{repo}/"
+
+    try:
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            return True, "Verified official registry tracking pathway."
+        elif response.status_code == 404:
+            return False, (
+                f"🚨 Registry Alert: Target image '{namespace}/{repo}' does not exist "
+                f"on Docker Hub. High probability of typosquatting/malicious dependency insertion."
+            )
+        # Any other status — inconclusive, default safe
+        return True, f"API lookup inconclusive (HTTP {response.status_code}), defaulting to safe allowance."
+    except requests.RequestException:
+        # Fall back to Levenshtein local checks if offline or timed out
+        return True, "Network timeout, falling back to local edit distance verification."
 
 
 def _levenshtein_distance(s1: str, s2: str) -> int:
@@ -76,14 +115,25 @@ def check_typosquat(image_name: str) -> tuple[bool, Optional[str]]:
     if name in POPULAR_IMAGES:
         return False, None
 
-    # Check edit distance against all popular images
+    # ── Live registry validation (primary check) ──────────────────────────
+    # Query Docker Hub to confirm whether the image actually exists.
+    # A 404 from the registry is a strong typosquat/fraud signal, even if
+    # the Levenshtein distance check below would have passed.
+    registry_exists, registry_msg = verify_image_exists_on_registry(image_name)
+    if not registry_exists:
+        return True, registry_msg
+
+    # ── Levenshtein fallback (offline / inconclusive registry response) ───
+    # Still run the edit-distance check so we warn about suspiciously close
+    # names even when the registry call defaulted to "safe allowance".
     for popular in POPULAR_IMAGES:
         distance = _levenshtein_distance(name, popular)
         # Flag if distance is 1 or 2 (very close to a popular image)
         if 0 < distance <= 2 and len(name) > 3:
             return True, (
                 f"⚠️  Possible typosquat: '{name}' is {distance} edit(s) away "
-                f"from popular image '{popular}'. Verify the image name."
+                f"from popular image '{popular}'. Verify the image name. "
+                f"(Registry note: {registry_msg})"
             )
 
     return False, None

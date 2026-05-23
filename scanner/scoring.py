@@ -190,36 +190,106 @@ def _fetch_kev_with_dates() -> dict[str, str]:
         return {}
 
 
+# ── Docker Registry helpers ───────────────────────────────────────────────────
+
+def fetch_latest_version_from_registry(image_name: str) -> str:
+    """
+    Queries Docker Hub API to pull the most recent tag release for an image.
+
+    Uses the library (official) namespace. For unofficial images the caller
+    should strip the namespace prefix before passing the base name.
+
+    Args:
+        image_name: Full image reference (e.g., "nginx:1.14" or "nginx").
+
+    Returns:
+        The latest tag name as a string, or "unknown" on any failure.
+    """
+    base_name = image_name.split(":")[0].split("/")[-1]
+    url = f"https://hub.docker.com/v2/repositories/library/{base_name}/tags/?page_size=1"
+    try:
+        res = requests.get(url, timeout=5)
+        if res.status_code == 200:
+            results = res.json().get("results", [])
+            if results:
+                return results[0].get("name", "unknown")
+    except requests.RequestException as e:
+        logger.warning("Registry version fetch failed for '%s': %s", image_name, e)
+    return "unknown"
+
+
+def _version_outdated_multiplier(installed_version: str, image_name: str) -> float:
+    """
+    Returns a score multiplier based on how outdated the installed version is.
+
+    Compares the installed_version against the latest tag fetched from
+    Docker Hub. If they differ, applies a penalty multiplier:
+        - Same version or unknown  →  1.0  (no change)
+        - Version mismatch detected →  1.25 (25 % boost; unpatched vector)
+
+    This multiplier is applied inside _compute_priority to compound the
+    risk rating when an image is running a demonstrably outdated release.
+
+    Args:
+        installed_version: The version string from CVEMatch (e.g., "1.14.2").
+        image_name:        The package/image name to query Docker Hub for.
+
+    Returns:
+        A float multiplier ≥ 1.0.
+    """
+    latest = fetch_latest_version_from_registry(image_name)
+    if latest == "unknown":
+        logger.debug("Could not determine latest version for '%s'; skipping multiplier.", image_name)
+        return 1.0
+
+    if latest != installed_version:
+        logger.info(
+            "Version outdated for '%s': installed=%s, latest=%s — applying patch multiplier.",
+            image_name, installed_version, latest,
+        )
+        return 1.25  # Configurable: raise this for stricter posture
+
+    return 1.0
+
+
 # ── Scoring formula ───────────────────────────────────────────────────────────
 
 def _compute_priority(
     cvss_score: float,
     epss_score: float,
     in_kev: bool,
+    version_multiplier: float = 1.0,  # NEW: patch-lag penalty from registry check
 ) -> float:
     """
     Composite priority score on a 0–10 scale.
 
     Formula:
         priority = (cvss/10 * W_CVSS + epss * W_EPSS + kev_flag * W_KEV) * 10
+                   * version_multiplier          ← NEW: compounds score when outdated
 
     Each signal is normalised to [0, 1] before weighting:
         - CVSS: divide by 10 (it's already 0–10 from NVD)
         - EPSS: already 0–1
         - KEV:  binary 0 or 1
 
+    The version_multiplier (≥ 1.0) is supplied by _version_outdated_multiplier()
+    when the installed package version lags behind the latest Docker Hub release,
+    indicating an unpatched vulnerability vector.
+
     With default weights (0.25 / 0.35 / 0.40):
         - A KEV entry alone scores 4.0/10
         - A KEV + EPSS 0.97 + CVSS 9.8 scores ~9.8/10 (maximum real-world)
         - Pure CVSS 9.8, EPSS 0.01, no KEV scores ~2.8/10
           (dangerous code flaw, but not being exploited yet)
+        - Any of the above × 1.25 multiplier if image is version-outdated
     """
     cvss_norm = min(cvss_score, 10.0) / 10.0
     epss_norm = min(max(epss_score, 0.0), 1.0)
     kev_norm  = 1.0 if in_kev else 0.0
 
     raw = (cvss_norm * W_CVSS + epss_norm * W_EPSS + kev_norm * W_KEV)
-    return round(min(raw * 10.0, 10.0), 3)
+    # Apply version-lag multiplier, then clamp to 10.0 ceiling
+    return round(min(raw * 10.0 * version_multiplier, 10.0), 3)
 
 
 def _risk_label(score: float) -> str:
@@ -281,7 +351,10 @@ def enrich_and_score(cves: list) -> list[ScoredCVE]:
         in_kev   = cid in kev_data
         kev_date = kev_data.get(cid)
 
-        priority = _compute_priority(cve.cvss_score, epss, in_kev)
+        # ── NEW: fetch version-lag multiplier from Docker Hub ──────────────
+        version_mult = _version_outdated_multiplier(cve.installed_version, cve.package)
+
+        priority = _compute_priority(cve.cvss_score, epss, in_kev, version_mult)
 
         scored.append(ScoredCVE(
             # mirror original fields
@@ -384,4 +457,4 @@ if __name__ == "__main__":
     print()
     code, msg = gate_decision(results)
     status = "BLOCKED" if code else "PASSED"
-    print(f"CI Gate: {status} — {xmsg}")
+    print(f"CI Gate: {status} — {msg}")
