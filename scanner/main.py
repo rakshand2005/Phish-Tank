@@ -9,28 +9,39 @@ Usage:
     scanner scan nginx:1.14 --output json
     scanner scan nginx:1.14 --fail-on CRITICAL
     scanner integrity nginx:1.14
+    scanner fix nginx:1.14
 """
-# ✅ BUG 1 FIXED: __future__ import is now the very first statement
 from __future__ import annotations
 
 import json
-import logging   # ✅ BUG 2 FIXED: import logging is its own clean line
+import logging
 import sys
+from datetime import datetime
 
 import click
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
 from rich.text import Text
+from rich.columns import Columns
+from rich.layout import Layout
+from rich.rule import Rule
 from rich import box
 
 from scanner import __version__
 from scanner.models import ScanResult
 from scanner.integrity import verify_image
 from scanner.sbom import generate_sbom, get_packages
-from scanner.matcher import check_db_freshness, update_db, scan_cves, parse_cve_matches
+from scanner.matcher import check_db_freshness, update_db as _update_trivy_db, scan_cves, parse_cve_matches
 from scanner.layers import get_layer_metadata, attribute_cves_to_layers, generate_fix_suggestions
-from scanner.scoring import enrich_and_score, gate_decision  # ✅ import at top, after __future__
+from scanner.scoring import enrich_and_score, gate_decision
+from scanner.remediate import (
+    reconstruct_dockerfile,
+    build_remediation_plan,
+    generate_patched_dockerfile,
+    print_remediation_report,
+    save_patched_dockerfile,
+)
 
 console = Console()
 logger = logging.getLogger("scanner")
@@ -68,12 +79,32 @@ def _severity_color(severity: str) -> str:
     }.get(severity, "white")
 
 
+def _severity_block(severity: str) -> str:
+    """Return a colored block character for severity bar charts."""
+    colors = {
+        "CRITICAL": "red",
+        "HIGH": "#ff6b6b",
+        "MEDIUM": "#ffd43b",
+        "LOW": "#74c0fc",
+    }
+    return colors.get(severity, "white")
+
+
 def _print_banner() -> None:
-    """Print the scanner banner."""
-    banner = Text()
-    banner.append("🛡️  Container Security Scanner", style="bold cyan")
-    banner.append(f"  v{__version__}", style="dim")
-    console.print(Panel(banner, border_style="cyan", box=box.ROUNDED))
+    """Print the scanner banner with ASCII art."""
+    art = Text()
+    art.append("\n")
+    art.append("   ███████╗ ██████╗ █████╗ ███╗   ██╗███╗   ██╗███████╗██████╗ \n", style="bold cyan")
+    art.append("   ██╔════╝██╔════╝██╔══██╗████╗  ██║████╗  ██║██╔════╝██╔══██╗\n", style="bold cyan")
+    art.append("   ███████╗██║     ███████║██╔██╗ ██║██╔██╗ ██║█████╗  ██████╔╝\n", style="cyan")
+    art.append("   ╚════██║██║     ██╔══██║██║╚██╗██║██║╚██╗██║██╔══╝  ██╔══██╗\n", style="cyan")
+    art.append("   ███████║╚██████╗██║  ██║██║ ╚████║██║ ╚████║███████╗██║  ██║\n", style="bold blue")
+    art.append("   ╚══════╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝\n", style="bold blue")
+    art.append("\n")
+    art.append("   🛡️  Container Security Scanner", style="bold white")
+    art.append(f"  v{__version__}\n", style="dim")
+    art.append("   SBOM Generation · CVE Matching · Auto-Remediation\n", style="dim italic")
+    console.print(Panel(art, border_style="cyan", box=box.DOUBLE))
 
 
 def _print_integrity_results(result: ScanResult) -> None:
@@ -121,20 +152,23 @@ def _print_db_freshness(result: ScanResult) -> None:
 
 
 def _print_summary(result: ScanResult) -> None:
-    """Print scan summary with severity counts."""
+    """Print scan summary with severity counts and visual bar chart."""
     counts = result.severity_counts
+    total_cves = len(result.cves)
 
+    # ── Stats Table ──
     summary = Table(
         title=f"📊 Scan Summary: {result.image}:{result.tag}",
         box=box.ROUNDED,
         title_style="bold white",
+        border_style="cyan",
     )
-    summary.add_column("Metric", style="cyan")
-    summary.add_column("Value", justify="right")
+    summary.add_column("Metric", style="cyan", min_width=20)
+    summary.add_column("Value", justify="right", min_width=10)
 
     summary.add_row("Total Packages", str(result.total_packages))
-    summary.add_row("Total CVEs", str(len(result.cves)))
-    summary.add_row("Fixable CVEs", str(result.fixable_count))
+    summary.add_row("Total CVEs", Text(str(total_cves), style="bold" if total_cves else "green"))
+    summary.add_row("Fixable CVEs", Text(str(result.fixable_count), style="green"))
     summary.add_row(
         "Critical",
         Text(str(counts["CRITICAL"]), style="bold red" if counts["CRITICAL"] else "green"),
@@ -143,10 +177,140 @@ def _print_summary(result: ScanResult) -> None:
         "High",
         Text(str(counts["HIGH"]), style="red" if counts["HIGH"] else "green"),
     )
-    summary.add_row("Medium", str(counts["MEDIUM"]))
-    summary.add_row("Low", str(counts["LOW"]))
+    summary.add_row("Medium", Text(str(counts["MEDIUM"]), style="yellow" if counts["MEDIUM"] else "green"))
+    summary.add_row("Low", Text(str(counts["LOW"]), style="blue" if counts["LOW"] else "green"))
 
     console.print(summary)
+    console.print()
+
+    # ── Severity Bar Chart ──
+    if total_cves > 0:
+        _print_severity_bar_chart(counts, total_cves)
+
+
+def _print_severity_bar_chart(counts: dict[str, int], total: int) -> None:
+    """Print a horizontal bar chart of CVE severity distribution."""
+    max_bar_width = 40
+    max_count = max(counts.values()) if any(counts.values()) else 1
+
+    chart = Table(
+        title="📈 Severity Distribution",
+        box=box.SIMPLE,
+        title_style="bold white",
+        show_header=False,
+        padding=(0, 1),
+    )
+    chart.add_column("Severity", style="bold", min_width=10, justify="right")
+    chart.add_column("Bar", min_width=45)
+    chart.add_column("Count", justify="right", min_width=8)
+    chart.add_column("%", justify="right", min_width=6)
+
+    for sev in ["CRITICAL", "HIGH", "MEDIUM", "LOW"]:
+        count = counts.get(sev, 0)
+        if count == 0 and sev in ("LOW",):
+            continue  # skip zero-count LOW to reduce clutter
+        bar_len = int((count / max_count) * max_bar_width) if max_count else 0
+        bar_len = max(bar_len, 1) if count > 0 else 0
+        color = _severity_block(sev)
+
+        bar = Text()
+        bar.append("█" * bar_len, style=color)
+        bar.append("░" * (max_bar_width - bar_len), style="dim")
+
+        pct = f"{(count / total * 100):.0f}%" if total else "0%"
+
+        sev_text = Text(sev, style=_severity_color(sev))
+        chart.add_row(sev_text, bar, str(count), pct)
+
+    console.print(chart)
+    console.print()
+
+
+def _print_risk_gauge(cves: list) -> None:
+    """
+    Print a visual risk score gauge for the overall scan.
+
+    Shows the highest priority score as a visual meter.
+    """
+    if not cves:
+        return
+
+    # Get the highest priority score
+    max_score = max(
+        (getattr(c, "priority_score", 0.0) for c in cves),
+        default=0.0,
+    )
+
+    # Build the gauge
+    gauge_width = 50
+    filled = int((max_score / 10.0) * gauge_width)
+    filled = min(filled, gauge_width)
+
+    # Color based on score
+    if max_score >= 8.0:
+        gauge_color = "bold red"
+        label = "CRITICAL RISK"
+    elif max_score >= 6.0:
+        gauge_color = "red"
+        label = "HIGH RISK"
+    elif max_score >= 3.5:
+        gauge_color = "yellow"
+        label = "MEDIUM RISK"
+    else:
+        gauge_color = "green"
+        label = "LOW RISK"
+
+    gauge = Text()
+    gauge.append("  Risk Score: ", style="bold")
+    gauge.append(f"{max_score:.1f}", style=gauge_color)
+    gauge.append("/10  ", style="dim")
+    gauge.append("[", style="dim")
+    gauge.append("█" * filled, style=gauge_color)
+    gauge.append("░" * (gauge_width - filled), style="dim")
+    gauge.append("]  ", style="dim")
+    gauge.append(label, style=gauge_color)
+
+    console.print(Panel(gauge, border_style="dim", box=box.ROUNDED))
+    console.print()
+
+
+def _print_score_breakdown(cves: list) -> None:
+    """Print top scored CVEs with their score breakdown."""
+    scored = [c for c in cves if hasattr(c, "score_breakdown")]
+    if not scored:
+        return
+
+    # Show top 5
+    top = scored[:5]
+
+    table = Table(
+        title="🎯 Top Risk CVEs (Priority Score Breakdown)",
+        box=box.SIMPLE_HEAVY,
+        title_style="bold white",
+        show_lines=True,
+    )
+    table.add_column("CVE ID", style="bold", min_width=18)
+    table.add_column("Score", justify="center", min_width=8)
+    table.add_column("Breakdown", min_width=50)
+
+    for cve in top:
+        score = cve.priority_score
+        if score >= 8.0:
+            score_style = "bold red"
+        elif score >= 6.0:
+            score_style = "red"
+        elif score >= 3.5:
+            score_style = "yellow"
+        else:
+            score_style = "green"
+
+        table.add_row(
+            cve.cve_id,
+            Text(f"{score:.2f}", style=score_style),
+            cve.score_breakdown(),
+        )
+
+    console.print(table)
     console.print()
 
 
@@ -315,10 +479,10 @@ def scan(image: str, output: str, fail_on: str, layers: bool, update_db: bool, v
     if update_db or db_freshness.is_stale:
         if output == "terminal":
             with console.status("[bold cyan]Updating vulnerability database..."):
-                update_db()
+                _update_trivy_db()
                 db_freshness = check_db_freshness()
         else:
-            update_db()
+            _update_trivy_db()
             db_freshness = check_db_freshness()
 
     # ── Step 3: SBOM Generation ──
@@ -388,14 +552,24 @@ def scan(image: str, output: str, fail_on: str, layers: bool, update_db: bool, v
         _print_integrity_results(result)
         _print_db_freshness(result)
         _print_summary(result)
+        _print_risk_gauge(cves)
+        _print_score_breakdown(cves)
         _print_cve_table(result, show_layers=layers)
         _print_layer_breakdown(result)
         _print_fix_suggestions(result)
 
+        # ── Scan timestamp ──
+        console.print(Rule(style="dim"))
+        console.print(
+            f"  [dim]Scan completed at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}[/dim]"
+        )
+        console.print()
+
         if result.has_critical:
             console.print(
                 Panel(
-                    "[bold red]🚨 CRITICAL vulnerabilities found! Pipeline should be BLOCKED.[/bold red]",
+                    "[bold red]🚨 CRITICAL vulnerabilities found! Pipeline should be BLOCKED.\n"
+                    "    Run [bold white]scanner fix {image}[/bold white] to auto-generate a patched Dockerfile.[/bold red]",
                     border_style="red",
                     box=box.HEAVY,
                 )
@@ -469,6 +643,115 @@ def integrity(image: str, verbose: bool):
     else:
         console.print("  [bold red]🚨 Integrity issues detected.[/bold red]\n")
         sys.exit(1)
+
+
+@cli.command(name="fix")
+@click.argument("image")
+@click.option("--output-dir", "-d", default=".",
+              help="Directory to write the patched Dockerfile.")
+@click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging.")
+def fix_command(image: str, output_dir: str, verbose: bool):
+    """
+    Auto-remediate a vulnerable Docker image.
+
+    Runs a full vulnerability scan, then generates a patched Dockerfile
+    that fixes all remediable CVEs. The patched Dockerfile is displayed
+    in the terminal and saved to disk.
+
+    Examples:
+
+        scanner fix nginx:1.14
+
+        scanner fix nginx:1.14 --output-dir ./patched
+    """
+    _setup_logging(verbose)
+    _print_banner()
+
+    console.print(f"  🔧 Auto-remediating: [bold cyan]{image}[/bold cyan]\n")
+
+    # ── Step 1: Full scan pipeline ──
+    with console.status("[bold cyan]Running integrity checks..."):
+        integrity = verify_image(image)
+
+    with console.status("[bold cyan]Checking vulnerability database..."):
+        db_freshness = check_db_freshness()
+
+    with console.status("[bold cyan]Generating SBOM..."):
+        sbom = generate_sbom(image)
+        packages = get_packages(sbom)
+
+    with console.status("[bold cyan]Scanning for vulnerabilities..."):
+        trivy_json = scan_cves(image)
+        cves = parse_cve_matches(trivy_json)
+
+    with console.status("[bold cyan]Enriching CVEs with EPSS and CISA KEV..."):
+        cves = enrich_and_score(cves)
+
+    with console.status("[bold cyan]Analyzing image layers..."):
+        try:
+            layer_infos = get_layer_metadata(image)
+            cves = attribute_cves_to_layers(cves, layer_infos)
+            cves = generate_fix_suggestions(cves, layer_infos)
+        except RuntimeError as e:
+            logger.warning("Layer analysis skipped: %s", e)
+            layer_infos = []
+
+    # ── Show scan summary ──
+    image_name, tag = _parse_image_name(image)
+    result = ScanResult(
+        image=image_name,
+        tag=tag,
+        integrity=integrity,
+        db_freshness=db_freshness,
+        total_packages=len(packages),
+        packages=packages,
+        cves=cves,
+        layers=layer_infos,
+    )
+    _print_summary(result)
+    _print_risk_gauge(cves)
+
+    if not cves:
+        console.print(
+            Panel(
+                "[bold green]✅ No vulnerabilities found! No remediation needed.[/bold green]",
+                border_style="green",
+                box=box.ROUNDED,
+            )
+        )
+        sys.exit(0)
+
+    # ── Step 2: Generate remediation ──
+    console.print(Rule("[bold magenta]🔧 Auto-Remediation[/bold magenta]", style="magenta"))
+    console.print()
+
+    with console.status("[bold magenta]Reconstructing Dockerfile from image history..."):
+        dockerfile_lines = reconstruct_dockerfile(image)
+
+    with console.status("[bold magenta]Building remediation plan..."):
+        plan = build_remediation_plan(image, cves, dockerfile_lines)
+
+    with console.status("[bold magenta]Generating patched Dockerfile..."):
+        patched_content = generate_patched_dockerfile(plan)
+
+    # ── Step 3: Display results ──
+    print_remediation_report(plan, patched_content)
+
+    # ── Step 4: Save to disk ──
+    saved_path = save_patched_dockerfile(patched_content, output_dir)
+    console.print(
+        Panel(
+            f"[bold green]✅ Patched Dockerfile saved to: {saved_path}[/bold green]\n"
+            f"\n"
+            f"   [dim]Next steps:[/dim]\n"
+            f"   [cyan]1.[/cyan] Review the patched Dockerfile\n"
+            f"   [cyan]2.[/cyan] Build: [bold]docker build -f {saved_path} -t {image_name}:patched .[/bold]\n"
+            f"   [cyan]3.[/cyan] Re-scan: [bold]scanner scan {image_name}:patched[/bold]\n"
+            f"   [cyan]4.[/cyan] Compare results to verify CVE reduction",
+            border_style="green",
+            box=box.DOUBLE,
+        )
+    )
 
 
 def main():

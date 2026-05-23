@@ -384,4 +384,4 @@ if __name__ == "__main__":
     print()
     code, msg = gate_decision(results)
     status = "BLOCKED" if code else "PASSED"
-    print(f"CI Gate: {status} — {xmsg}")
+    print(f"CI Gate: {status} — {msg}")

@@ -36,6 +36,10 @@ scanner scan nginx:1.14 --fail-on CRITICAL
 
 # Integrity check only (signature, typosquat, digest pinning)
 scanner integrity nginx:1.14
+
+# 🔧 Auto-remediate: generate a patched Dockerfile
+scanner fix nginx:1.14
+scanner fix nginx:1.14 --output-dir ./patched
 ```
 
 ### Or Run Directly with Docker
@@ -110,6 +114,8 @@ scanner/
 ├── sbom.py           # SBOM generation (Trivy)
 ├── matcher.py        # CVE matching + DB freshness
 ├── layers.py         # Layer attribution + fix suggestions
+├── scoring.py        # Risk scoring (CVSS + EPSS + CISA KEV)
+├── remediate.py      # 🔧 Auto-remediation Dockerfile generator
 └── models.py         # Shared data models (contract for P3/P4)
 ```
 
@@ -166,6 +172,8 @@ docker run --rm -v /var/run/docker.sock:/var/run/docker.sock scanner scan nginx:
 | `scanner scan <image> --update-db` | Force update Trivy DB before scan |
 | `scanner scan <image> -v` | Verbose logging |
 | `scanner integrity <image>` | Integrity checks only |
+| `scanner fix <image>` | 🔧 Auto-generate a patched Dockerfile |
+| `scanner fix <image> --output-dir ./out` | Save patched Dockerfile to directory |
 | `scanner --version` | Show version |
 
 ---
