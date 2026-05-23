@@ -1,6 +1,6 @@
-# 🛠️ Container Security Scanner — Setup & Evaluation Guide
+# 🛡️ Phish Net — Setup & Evaluation Guide
 
-Welcome to the Container Security Scanner! This guide provides step-by-step instructions on how to set up the project locally, run vulnerability scans, and evaluate the tool's capabilities.
+Welcome to Phish Net! This guide provides step-by-step instructions on how to set up the project locally, run vulnerability scans, and evaluate the tool's capabilities.
 
 ---
 
@@ -28,7 +28,7 @@ cd Phish-Tank
 ### Step 2: Build the Docker Image
 Run this command from the root of the project directory:
 ```bash
-docker build -t scanner:latest .
+docker build -t phish-net:latest .
 ```
 
 ---
@@ -42,31 +42,45 @@ Run a full scan including integrity checks, SBOM generation, CVE matching, EPSS/
 
 **On Windows (PowerShell or Command Prompt):**
 ```bash
-docker run --rm -v //var/run/docker.sock:/var/run/docker.sock scanner:latest scan nginx:1.14
+docker run --rm -v //var/run/docker.sock:/var/run/docker.sock phish-net:latest scan nginx:1.14
 ```
 *(Note the double slash `//var/run/docker.sock` which prevents path mangling on Windows).*
 
 **On Linux/macOS:**
 ```bash
-docker run --rm -v /var/run/docker.sock:/var/run/docker.sock scanner:latest scan nginx:1.14
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock phish-net:latest scan nginx:1.14
 ```
 
 ### JSON Output Format
 Useful for integrating the scanner into CI/CD pipelines or piping data to other reporting tools:
 ```bash
-docker run --rm -v //var/run/docker.sock:/var/run/docker.sock scanner:latest scan nginx:1.14 --output json
+docker run --rm -v //var/run/docker.sock:/var/run/docker.sock phish-net:latest scan nginx:1.14 --output json
 ```
 
 ### CI Gate Logic
 Test the scanner's ability to block a CI/CD pipeline if critical vulnerabilities (based on CVSS, EPSS, and active exploitation) are found:
 ```bash
-docker run --rm -v //var/run/docker.sock:/var/run/docker.sock scanner:latest scan nginx:1.14 --fail-on CRITICAL
+docker run --rm -v //var/run/docker.sock:/var/run/docker.sock phish-net:latest scan nginx:1.14 --fail-on CRITICAL
 ```
 
 ### Integrity Checks Only
 If you only want to verify image signatures, SLSA provenance, digest pinning, and typosquatting without running a full CVE scan:
 ```bash
-docker run --rm -v //var/run/docker.sock:/var/run/docker.sock scanner:latest integrity nginx:1.14
+docker run --rm -v //var/run/docker.sock:/var/run/docker.sock phish-net:latest integrity nginx:1.14
+```
+
+### Auto-Remediation (scanner fix)
+Generates a patched Dockerfile that upgrades the base image, pins vulnerable package versions, adds a non-root user, and adds a HEALTHCHECK instruction.
+```bash
+docker run --rm -v //var/run/docker.sock:/var/run/docker.sock phish-net:latest fix nginx:1.14
+```
+
+To save the patched Dockerfile to a local directory:
+```bash
+docker run --rm \
+  -v //var/run/docker.sock:/var/run/docker.sock \
+  -v $(pwd)/patched:/output \
+  phish-net:latest fix nginx:1.14 --output-dir /output
 ```
 
 ---
@@ -75,12 +89,13 @@ docker run --rm -v //var/run/docker.sock:/var/run/docker.sock scanner:latest int
 
 If you wish to run the Python code directly on your host machine without Docker (for development or code review):
 
-1. **Install external dependencies:** You must install [Trivy](https://aquasecurity.github.io/trivy/v0.48/getting-started/installation/) and [Cosign](https://docs.sigstore.dev/cosign/system_config/installation/) globally on your OS.
+1. **Install external dependencies:** You must install [Trivy](https://aquasecurity.github.io/trivy) and [Cosign](https://docs.sigstore.dev/cosign/system_config/installation/) globally on your OS.
 2. **Create a virtual environment:**
    ```bash
    python -m venv venv
-   # Windows: .\venv\Scripts\activate
-   # Linux/macOS: source venv/bin/activate
+   # Windows (Command Prompt): venv\Scripts\activate
+   # Windows (PowerShell):     .\venv\Scripts\Activate.ps1
+   # Linux/macOS:              source venv/bin/activate
    ```
 3. **Install the package:**
    ```bash

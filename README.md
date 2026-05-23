@@ -1,60 +1,64 @@
-# 🛡️ Container Security Scanner
+# 🛡️ Phish Net — Container Security Scanner
 
-**SBOM Generation · CVE Matching · Layer Attribution · Integrity Verification**
-
-A CLI tool that scans Docker images for vulnerabilities, generates a Software Bill of Materials (SBOM), attributes CVEs to specific image layers, and provides actionable fix suggestions.
-
-> **MITRE ATT&CK:** T1195.001 — Supply Chain Compromise: Software Dependencies
+**SBOM Generation · CVE Matching · Layer Attribution · Integrity Verification · Auto-Remediation**
 
 ---
 
-## 🚀 Quick Start
+## 🎯 Project Overview (Evaluation Guide)
 
-### Install (One Command)
+### What problem does this solve?
+Phish Net is a comprehensive supply-chain security tool for Docker container images that prevents malicious dependencies, compromised tags, and vulnerable packages from reaching production. It combines SBOM (Software Bill of Materials) generation, CVE scanning, cryptographic integrity verification, and dynamic risk scoring into a single CI/CD-friendly pipeline. Crucially, it goes beyond reporting by offering **auto-remediation**, instantly generating a hardened Dockerfile that upgrades base images, pins safe package versions, and enforces security best practices.
 
-**Linux / macOS:**
+### Which architecture does it target?
+**Cloud-Native & CI/CD Pipelines.** It is designed to run in automated build pipelines (like GitHub Actions or GitLab CI) or locally on developer workstations to gate container deployments before they reach orchestration environments like Kubernetes.
+
+### What MITRE ATT&CK techniques does it address?
+- **T1195.001** — Supply Chain Compromise: Software Dependencies
+- **T1195.002** — Supply Chain Compromise: Supply Chain (Tag Poisoning)
+- **T1036.005** — Masquerading: Match Legitimate Name or Location (Typosquatting & Fake Tags)
+- **T1553.002** — Subvert Trust Controls: Code Signing (Cosign Verification)
+- **T1190**     — Exploit Public-Facing Application (Known CVEs)
+
+### How do you run it?
+The easiest and most robust way to evaluate the scanner is by building and running its Docker image, which comes pre-packaged with all dependencies.
+
+**Step 1: Clone & Build**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/rakshand2005/Phish-Tank/main/install.sh | bash
+git clone https://github.com/rakshand2005/Phish-Tank.git
+cd Phish-Tank
+docker build -t phish-net .
 ```
 
-**Windows (PowerShell):**
-```powershell
-irm https://raw.githubusercontent.com/rakshand2005/Phish-Tank/main/install.ps1 | iex
-```
-
-### Usage
-
+**Step 2: Run a Full Scan**
 ```bash
-# Full vulnerability scan
-scanner scan nginx:1.14
+# Linux / macOS
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock phish-net scan nginx:1.14
 
-# JSON output (for CI pipelines / downstream processing)
-scanner scan nginx:1.14 --output json
-
-# Block CI if priority score >= 7.0 (Custom scoring logic)
-# (Automatically applied, but --fail-on CRITICAL legacy flag still available)
-scanner scan nginx:1.14
-
-# Integrity check only (signature, typosquat, digest pinning)
-scanner integrity nginx:1.14
-
-# 🔧 Auto-remediate: generate a patched Dockerfile
-scanner fix nginx:1.14
-scanner fix nginx:1.14 --output-dir ./patched
+# Windows (PowerShell)
+docker run --rm -v //var/run/docker.sock:/var/run/docker.sock phish-net scan nginx:1.14
 ```
 
-### Or Run Directly with Docker
-
+**Step 3: Auto-Remediate a Vulnerable Image**
 ```bash
-docker run --rm \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  ghcr.io/rakshand2005/Phish-Tank:latest \
-  scan nginx:1.14
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock phish-net fix nginx:1.14
 ```
+
+### What dependencies does it have?
+- **Docker Engine / Docker Desktop** (Required for inspecting image layers via the Docker socket)
+- **Trivy** (Vulnerability scanning & SBOM generation)
+- **Cosign** (Cryptographic signature & attestation verification)
+- **Python 3.9+** (Core orchestration logic, utilizing `click`, `rich`, `requests`, and `docker` SDK)
+*(Note: If using the Dockerized installation method above, Trivy, Cosign, and Python are bundled inside the image).*
+
+### What are known limitations or gaps?
+1. **Docker Socket Requirement:** The scanner requires access to `/var/run/docker.sock` to inspect image layers. While it only performs read-only operations (`pull` and `inspect`), exposing the socket in some strict CI environments requires specific privilege configurations.
+2. **First-Pull Tag Poisoning Blindspot:** The supply-chain tag poisoning check relies on comparing the local image digest to the remote registry digest. If an image is being pulled for the very first time, there is no local baseline to detect drift.
+3. **External Network Reliance:** Risk scoring depends on live queries to the FIRST.org EPSS API, CISA KEV feed, and Docker Hub API. While it fails open safely, network isolation will degrade scoring accuracy.
+4. **Out of Scope:** It does not scan custom application source code (SAST) or runtime behavior (DAST) — it strictly secures the container supply chain and package dependencies.
 
 ---
 
-## 📊 What It Does
+## 📊 How It Works
 
 ```
 Image name (input)
@@ -64,12 +68,12 @@ Image name (input)
 │  ✅ Cosign signature check      │
 │  ✅ SBOM attestation (SLSA)     │
 │  ✅ Digest pinning check        │
-│  ✅ Typosquat detection         │
+│  ✅ Typosquat & Tag Poisoning   │
 └─────────────────────────────────┘
       │
       ▼
 ┌─ sbom.py ───────────────────────┐
-│  ✅ Trivy → CycloneDX SBOM     │
+│  ✅ Trivy → CycloneDX SBOM      │
 │  ✅ Package extraction          │
 └─────────────────────────────────┘
       │
@@ -81,6 +85,13 @@ Image name (input)
 └─────────────────────────────────┘
       │
       ▼
+┌─ scoring.py ────────────────────┐
+│  ✅ CISA KEV active exploits    │
+│  ✅ FIRST.org EPSS scores       │
+│  ✅ Composite Risk Priority     │
+└─────────────────────────────────┘
+      │
+      ▼
 ┌─ layers.py ─────────────────────┐
 │  ✅ Docker layer inspection     │
 │  ✅ CVE-to-layer attribution    │
@@ -88,85 +99,16 @@ Image name (input)
 └─────────────────────────────────┘
       │
       ▼
-   ScanResult JSON → scoring → report → CI gate
+┌─ remediate.py (scanner fix) ────┐
+│  ✅ Reconstruct Dockerfile      │
+│  ✅ Upgrade Base Image          │
+│  ✅ Pin Safe Packages           │
+└─────────────────────────────────┘
 ```
 
 ---
 
-## 🔐 Edge Cases Handled
-
-| Gap | How We Fix It |
-|-----|--------------|
-| Image not signed (Cosign) | Warns before scan, flags in report |
-| No SBOM attestation (SLSA) | Checks via `cosign verify-attestation` |
-| Stale vulnerability DB | Checks DB age, auto-updates if > 24h old |
-| Typosquatting (e.g., `ngimx`) | Levenshtein distance against popular images |
-| Mutable tags (`:latest`) | Warns about digest pinning |
-
----
-
-## 🏗️ Project Structure
-
-```
-scanner/
-├── __init__.py       # Package init
-├── main.py           # CLI entry point (Click)
-├── integrity.py      # Image integrity verification
-├── sbom.py           # SBOM generation (Trivy)
-├── matcher.py        # CVE matching + DB freshness
-├── layers.py         # Layer attribution + fix suggestions
-├── scoring.py        # Risk scoring (CVSS + EPSS + CISA KEV) + CI Gate logic
-├── remediate.py      # 🔧 Auto-remediation Dockerfile generator
-├── models.py         # Shared data models (contract for P3/P4)
-└── tests/            # Test suite for integrity and scoring components
-```
-
----
-
-## 👥 Team Roles
-
-| Person | Module | Responsibility |
-|--------|--------|---------------|
-| **P1 (You)** | `integrity.py`, `sbom.py`, `matcher.py`, `layers.py` | SBOM + CVE + Layer Attribution |
-| **P3** | `scoring.py` | Risk scoring + CI gate logic |
-| **P4** | `report.py` | Report output (JSON + terminal) |
-| **P5** | `.github/workflows/`, `Makefile` | Demo pipeline setup |
-
-### For P3 and P4:
-1. Read `scanner/models.py` — this is the data contract
-2. Use `sample_output/sample_scan.json` to develop against
-3. Your code receives a `ScanResult` object from P1's pipeline
-
----
-
-## 🔧 Development Setup
-
-```bash
-# Clone the repo
-git clone https://github.com/rakshand2005/Phish-Tank.git
-cd container-scanner
-
-# Install Python dependencies
-pip install -e .
-
-# Requirements: Docker running + Trivy + Cosign installed
-# (All included in the Dockerfile)
-
-# Run the test suite
-pytest tests/
-```
-
-### Build the Docker image locally:
-```bash
-docker build -t scanner .
-
-# Test it
-docker run --rm -v /var/run/docker.sock:/var/run/docker.sock scanner scan nginx:1.14
-```
-
----
-
-## 📋 CLI Reference
+## 📋 Extended CLI Reference
 
 | Command | Description |
 |---------|------------|
@@ -182,18 +124,3 @@ docker run --rm -v /var/run/docker.sock:/var/run/docker.sock scanner scan nginx:
 | `scanner --version` | Show version |
 
 ---
-
-## 📦 Tech Stack
-
-- **Trivy** — SBOM generation + CVE scanning
-- **Cosign** — Image signature verification
-- **Docker SDK for Python** — Layer inspection
-- **Click** — CLI framework
-- **Rich** — Terminal UI (tables, colors, spinners)
-- **Python 3.9+** — Orchestration
-
----
-
-## 📜 License
-
-MIT
