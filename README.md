@@ -20,27 +20,29 @@ Phish Net is a comprehensive supply-chain security tool for Docker container ima
 - **T1190**     — Exploit Public-Facing Application (Known CVEs)
 
 ### How do you run it?
-The easiest and most robust way to evaluate the scanner is by building and running its Docker image, which comes pre-packaged with all dependencies.
+The easiest and most robust way to evaluate the scanner is by using the automated installation scripts. This installs a lightweight `phishnet` CLI command that automatically orchestrates the underlying Docker container for you.
 
-**Step 1: Clone & Build**
+**Installation on Linux / macOS:**
 ```bash
-git clone https://github.com/rakshand2005/Phish-Tank.git
-cd Phish-Tank
-docker build -t phish-net .
+curl -fsSL https://raw.githubusercontent.com/rakshand2005/Phish-Tank/main/install.sh | bash
+source ~/.bashrc  # (or ~/.zshrc)
 ```
 
-**Step 2: Run a Full Scan**
-```bash
-# Linux / macOS
-docker run --rm -v /var/run/docker.sock:/var/run/docker.sock phish-net scan nginx:1.14
-
-# Windows (PowerShell)
-docker run --rm -v //var/run/docker.sock:/var/run/docker.sock phish-net scan nginx:1.14
+**Installation on Windows (PowerShell):**
+```powershell
+irm https://raw.githubusercontent.com/rakshand2005/Phish-Tank/main/install.ps1 | iex
 ```
 
-**Step 3: Auto-Remediate a Vulnerable Image**
+Once installed, you can simply use the `phishnet` command!
+
+**Run a Full Scan:**
 ```bash
-docker run --rm -v /var/run/docker.sock:/var/run/docker.sock phish-net fix nginx:1.14
+phishnet scan nginx:1.14
+```
+
+**Auto-Remediate a Vulnerable Image:**
+```bash
+phishnet fix nginx:1.14
 ```
 
 ### What dependencies does it have?
@@ -99,7 +101,7 @@ Image name (input)
 └─────────────────────────────────┘
       │
       ▼
-┌─ remediate.py (scanner fix) ────┐
+┌─ remediate.py (phishnet fix) ───┐
 │  ✅ Reconstruct Dockerfile      │
 │  ✅ Upgrade Base Image          │
 │  ✅ Pin Safe Packages           │
@@ -112,15 +114,15 @@ Image name (input)
 
 | Command | Description |
 |---------|------------|
-| `scanner scan <image>` | Full vulnerability scan |
-| `scanner scan <image> --output json` | JSON output to stdout |
-| `scanner scan <image> --fail-on CRITICAL` | Exit code 1 if CRITICAL found |
-| `scanner scan <image> --layers` | Include layer attribution (default: on) |
-| `scanner scan <image> --update-db` | Force update Trivy DB before scan |
-| `scanner scan <image> -v` | Verbose logging |
-| `scanner integrity <image>` | Integrity checks only |
-| `scanner fix <image>` | 🔧 Auto-generate a patched Dockerfile |
-| `scanner fix <image> --output-dir ./out` | Save patched Dockerfile to directory |
-| `scanner --version` | Show version |
+| `phishnet scan <image>` | Full vulnerability scan |
+| `phishnet scan <image> --output json` | JSON output to stdout |
+| `phishnet scan <image> --fail-on CRITICAL` | Exit code 1 if CRITICAL found |
+| `phishnet scan <image> --layers` | Include layer attribution (default: on) |
+| `phishnet scan <image> --update-db` | Force update Trivy DB before scan |
+| `phishnet scan <image> -v` | Verbose logging |
+| `phishnet integrity <image>` | Integrity checks only |
+| `phishnet fix <image>` | 🔧 Auto-generate a patched Dockerfile |
+| `phishnet fix <image> --output-dir ./out` | Save patched Dockerfile to directory |
+| `phishnet --version` | Show version |
 
 ---
