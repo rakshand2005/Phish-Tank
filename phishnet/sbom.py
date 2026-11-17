@@ -15,20 +15,25 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-from scanner.models import Package
+from phishnet.models import Package
 
 logger = logging.getLogger(__name__)
 
 
-def generate_sbom(image_name: str, output_dir: Optional[str] = None) -> dict:
+def generate_sbom(
+    target: str,
+    output_dir: Optional[str] = None,
+    target_kind: str = "image",
+) -> dict:
     """
     Generate an SBOM for the given Docker image using Trivy.
 
     Runs: trivy image --format cyclonedx --output <file> <image>
 
     Args:
-        image_name: The Docker image to scan (e.g., "nginx:1.14").
+        target: Docker image reference or source directory to scan.
         output_dir: Directory to save the SBOM file. If None, uses a temp dir.
+        target_kind: Either ``image`` or ``filesystem``.
 
     Returns:
         Parsed CycloneDX JSON as a dictionary.
@@ -36,25 +41,31 @@ def generate_sbom(image_name: str, output_dir: Optional[str] = None) -> dict:
     Raises:
         RuntimeError: If Trivy fails to generate the SBOM.
     """
+    if target_kind not in {"image", "filesystem"}:
+        raise ValueError("target_kind must be 'image' or 'filesystem'")
+
+    trivy_target = "image" if target_kind == "image" else "fs"
+    pkg_types = "os,library" if target_kind == "image" else "library"
+
     if output_dir:
         sbom_path = Path(output_dir) / "sbom.json"
     else:
         sbom_path = Path(tempfile.mkdtemp()) / "sbom.json"
 
-    logger.info("Generating SBOM for '%s' → %s", image_name, sbom_path)
+    logger.info("Generating %s SBOM for '%s' → %s", target_kind, target, sbom_path)
 
     try:
         result = subprocess.run(
             [
-                "trivy", "image",
+                "trivy", trivy_target,
                 "--format", "cyclonedx",
                 "--scanners", "vuln",
                 "--skip-db-update",
                 "--skip-java-db-update",
-                "--pkg-types", "os",
+                "--pkg-types", pkg_types,
                 "--output", str(sbom_path),
                 "--quiet",
-                image_name,
+                target,
             ],
             capture_output=True,
             text=True,
@@ -65,7 +76,7 @@ def generate_sbom(image_name: str, output_dir: Optional[str] = None) -> dict:
             error_msg = result.stderr.strip()
             logger.error("Trivy SBOM generation failed: %s", error_msg)
             raise RuntimeError(
-                f"Trivy SBOM generation failed for '{image_name}': {error_msg}"
+                f"Trivy SBOM generation failed for '{target}': {error_msg}"
             )
 
         if not sbom_path.exists():

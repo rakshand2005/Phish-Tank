@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from scanner.models import CVEMatch, DBFreshnessResult
+from phishnet.models import CVEMatch, DBFreshnessResult
 
 logger = logging.getLogger(__name__)
 
@@ -126,14 +126,15 @@ def update_db() -> bool:
         return False
 
 
-def scan_cves(image_name: str) -> dict:
+def scan_cves(target: str, target_kind: str = "image") -> dict:
     """
     Scan a Docker image for CVEs using Trivy.
 
     Runs: trivy image --format json <image>
 
     Args:
-        image_name: The Docker image to scan (e.g., "nginx:1.14").
+        target: Docker image reference or source directory to scan.
+        target_kind: Either ``image`` or ``filesystem``.
 
     Returns:
         Raw Trivy JSON output as a dictionary.
@@ -141,19 +142,24 @@ def scan_cves(image_name: str) -> dict:
     Raises:
         RuntimeError: If Trivy fails to scan.
     """
-    logger.info("Scanning '%s' for CVEs...", image_name)
+    if target_kind not in {"image", "filesystem"}:
+        raise ValueError("target_kind must be 'image' or 'filesystem'")
+
+    trivy_target = "image" if target_kind == "image" else "fs"
+    pkg_types = "os,library" if target_kind == "image" else "library"
+    logger.info("Scanning %s target '%s' for CVEs...", target_kind, target)
 
     try:
         result = subprocess.run(
             [
-                "trivy", "image",
+                "trivy", trivy_target,
                 "--format", "json",
                 "--scanners", "vuln",
                 "--skip-db-update",
                 "--skip-java-db-update",
-                "--pkg-types", "os",
+                "--pkg-types", pkg_types,
                 "--quiet",
-                image_name,
+                target,
             ],
             capture_output=True,
             text=True,
@@ -163,7 +169,7 @@ def scan_cves(image_name: str) -> dict:
         if result.returncode != 0 and not result.stdout:
             error_msg = result.stderr.strip()
             raise RuntimeError(
-                f"Trivy CVE scan failed for '{image_name}': {error_msg}"
+                f"Trivy CVE scan failed for '{target}': {error_msg}"
             )
 
         trivy_json = json.loads(result.stdout)
@@ -204,6 +210,9 @@ def parse_cve_matches(trivy_json: dict) -> list[CVEMatch]:
     seen_cves: set[str] = set()  # Deduplicate
 
     for result in trivy_json.get("Results", []):
+        target = result.get("Target", "")
+        pkg_type = _classify_cve_package(result)
+
         for vuln in result.get("Vulnerabilities", []):
             cve_id = vuln.get("VulnerabilityID", "UNKNOWN")
 
@@ -231,6 +240,8 @@ def parse_cve_matches(trivy_json: dict) -> list[CVEMatch]:
                     layer_id=layer_id,
                     layer_command=None,  # Will be enriched by layers.py
                     description=vuln.get("Title", vuln.get("Description", ""))[:200],
+                    pkg_type=pkg_type,
+                    target_path=target,
                 )
             )
 
@@ -247,6 +258,56 @@ def parse_cve_matches(trivy_json: dict) -> list[CVEMatch]:
     )
 
     return cve_matches
+
+
+def _classify_cve_package(result: dict) -> str:
+    """
+    Determine the package ecosystem/type (python, node, java, go, etc.) from Trivy result.
+    """
+    target = result.get("Target", "").lower()
+    type_str = (result.get("Type", "") or "").lower()
+    class_str = (result.get("Class", "") or "").lower()
+
+    type_map = {
+        "pip": "python",
+        "poetry": "python",
+        "pipenv": "python",
+        "npm": "node",
+        "yarn": "node",
+        "pnpm": "node",
+        "nodejs": "node",
+        "maven": "java",
+        "gradle": "java",
+        "pom": "java",
+        "gomod": "go",
+        "go": "go",
+        "bundler": "ruby",
+        "gem": "ruby",
+        "cargo": "rust",
+        "nuget": "dotnet",
+        "composer": "php",
+    }
+    for k, v in type_map.items():
+        if k in type_str:
+            return v
+
+    if any(p in target for p in ["requirements.txt", "setup.py", "site-packages", "pyproject.toml"]):
+        return "python"
+    if any(p in target for p in ["package.json", "package-lock.json", "yarn.lock", "node_modules"]):
+        return "node"
+    if any(p in target for p in ["pom.xml", "build.gradle", ".jar", ".war"]):
+        return "java"
+    if any(p in target for p in ["go.mod", "go.sum"]):
+        return "go"
+    if any(p in target for p in ["gemfile", "gemfile.lock"]):
+        return "ruby"
+    if any(p in target for p in ["cargo.toml", "cargo.lock"]):
+        return "rust"
+
+    if class_str == "lang-pkgs":
+        return "library"
+
+    return "os"
 
 
 def _extract_cvss_score(vuln: dict) -> float:

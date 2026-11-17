@@ -1,12 +1,12 @@
 # ──────────────────────────────────────────────────────────────────
-# Container Security Scanner — Dockerfile
-# Packages Trivy + Cosign + Docker CLI + Python scanner into one image
+# Phish Net — Dockerfile
+# Packages Trivy + Cosign + Docker CLI + Python into one image
 # ──────────────────────────────────────────────────────────────────
 
 FROM python:3.11-slim AS base
 
 LABEL maintainer="Team 15 - Container Security"
-LABEL description="Container Security Scanner with SBOM generation, CVE matching, and layer attribution"
+LABEL description="Phish Net with SBOM generation, CVE matching, and layer attribution"
 
 # Avoid prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
@@ -36,14 +36,14 @@ RUN COSIGN_VERSION="v2.4.0" \
     && curl -Lo /usr/local/bin/cosign "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64" \
     && chmod +x /usr/local/bin/cosign
 
-# ── Install Python scanner ──
+# ── Install Phish Net ──
 WORKDIR /app
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY pyproject.toml .
-COPY scanner/ scanner/
+COPY phishnet/ phishnet/
 
 RUN pip install --no-cache-dir -e .
 
@@ -52,5 +52,5 @@ RUN pip install --no-cache-dir -e .
 RUN trivy image --download-db-only
 
 # ── Entry point ──
-ENTRYPOINT ["scanner"]
+ENTRYPOINT ["phishnet"]
 CMD ["--help"]
