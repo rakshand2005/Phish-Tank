@@ -1,4 +1,4 @@
-# 🛡️ Phish Net — Container Security Scanner
+# 🛡️ Phish Net — Container Security Tool
 
 **SBOM Generation · CVE Matching · Layer Attribution · Integrity Verification · Auto-Remediation**
 
@@ -20,7 +20,7 @@ Phish Net is a comprehensive supply-chain security tool for Docker container ima
 - **T1190**     — Exploit Public-Facing Application (Known CVEs)
 
 ### How do you run it?
-The easiest and most robust way to evaluate the scanner is by using the automated installation scripts. This installs a lightweight `phishnet` CLI command that automatically orchestrates the underlying Docker container for you.
+The easiest and most robust way to evaluate Phish Net is by using the automated installation scripts. This installs a lightweight `phishnet` CLI command that automatically orchestrates the underlying Docker container for you.
 
 **Installation on Linux / macOS:**
 ```bash
@@ -40,6 +40,16 @@ Once installed, you can simply use the `phishnet` command!
 phishnet scan nginx:1.14
 ```
 
+**Scan application dependencies before building an image:**
+```bash
+phishnet scan-dir .
+```
+
+`scan` checks OS packages and language libraries installed in the final image.
+`scan-dir` checks dependency manifests and lockfiles in the source tree,
+including transitive dependencies Trivy can resolve. Lockfiles provide the most
+reliable version matching; unconstrained dependency ranges may be skipped.
+
 **Auto-Remediate a Vulnerable Image:**
 ```bash
 phishnet fix nginx:1.14
@@ -53,7 +63,7 @@ phishnet fix nginx:1.14
 *(Note: If using the Dockerized installation method above, Trivy, Cosign, and Python are bundled inside the image).*
 
 ### What are known limitations or gaps?
-1. **Docker Socket Requirement:** The scanner requires access to `/var/run/docker.sock` to inspect image layers. While it only performs read-only operations (`pull` and `inspect`), exposing the socket in some strict CI environments requires specific privilege configurations.
+1. **Docker Socket Requirement:** Phish Net requires access to `/var/run/docker.sock` to inspect image layers. While it only performs read-only operations (`pull` and `inspect`), exposing the socket in some strict CI environments requires specific privilege configurations.
 2. **First-Pull Tag Poisoning Blindspot:** The supply-chain tag poisoning check relies on comparing the local image digest to the remote registry digest. If an image is being pulled for the very first time, there is no local baseline to detect drift.
 3. **External Network Reliance:** Risk scoring depends on live queries to the FIRST.org EPSS API, CISA KEV feed, and Docker Hub API. While it fails open safely, network isolation will degrade scoring accuracy.
 4. **Out of Scope:** It does not scan custom application source code (SAST) or runtime behavior (DAST) — it strictly secures the container supply chain and package dependencies.
@@ -115,6 +125,8 @@ Image name (input)
 | Command | Description |
 |---------|------------|
 | `phishnet scan <image>` | Full vulnerability scan |
+| `phishnet scan-dir <directory>` | Scan source dependency manifests and lockfiles |
+| `phishnet scan-dir . --output json` | Source dependency findings as JSON |
 | `phishnet scan <image> --output json` | JSON output to stdout |
 | `phishnet scan <image> --fail-on CRITICAL` | Exit code 1 if CRITICAL found |
 | `phishnet scan <image> --layers` | Include layer attribution (default: on) |

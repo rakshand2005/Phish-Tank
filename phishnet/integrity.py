@@ -20,7 +20,13 @@ from typing import Optional
 
 import requests
 
-from scanner.models import IntegrityResult
+from phishnet.models import IntegrityResult
+from phishnet.registry import (
+    parse_image_reference,
+    verify_registry_image_exists,
+    check_registry_tag_exists,
+    fetch_registry_digest,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,41 +47,10 @@ POPULAR_IMAGES = [
 
 def verify_image_exists_on_registry(image_name: str) -> tuple[bool, str]:
     """
-    Queries the official Docker Registry API to confirm if the namespace/image
-    is a real, registered public artifact or a non-existent typosquat.
-
-    Makes a live call to Docker Hub API. A 404 response proves the image
-    is fraudulent or typo-squatted. Falls back gracefully on network failure.
-
-    Args:
-        image_name: The full image reference (e.g., "nginx:1.14" or "user/repo").
-
-    Returns:
-        Tuple of (image_exists, message).
+    Queries the official Docker Registry or third-party OCI Registry to confirm
+    if the namespace/image is a real, registered public artifact or a non-existent typosquat.
     """
-    # Isolate registry elements: repo/name (strip tag and digest)
-    parts = image_name.split(":")[0].split("@")[0].split("/")
-    if len(parts) == 1:
-        namespace, repo = "library", parts[0]
-    else:
-        namespace, repo = parts[0], parts[1]
-
-    url = f"https://hub.docker.com/v2/repositories/{namespace}/{repo}/"
-
-    try:
-        response = requests.get(url, timeout=5)
-        if response.status_code == 200:
-            return True, "Verified official registry tracking pathway."
-        elif response.status_code == 404:
-            return False, (
-                f"🚨 Registry Alert: Target image '{namespace}/{repo}' does not exist "
-                f"on Docker Hub. High probability of typosquatting/malicious dependency insertion."
-            )
-        # Any other status — inconclusive, default safe
-        return True, f"API lookup inconclusive (HTTP {response.status_code}), defaulting to safe allowance."
-    except requests.RequestException:
-        # Fall back to Levenshtein local checks if offline or timed out
-        return True, "Network timeout, falling back to local edit distance verification."
+    return verify_registry_image_exists(image_name)
 
 
 # ── Tag parsing helpers ───────────────────────────────────────────────────────
@@ -107,57 +82,9 @@ def _parse_image_ref(image_name: str) -> tuple[str, str, str]:
 
 def check_fake_version_tag(image_name: str) -> tuple[bool, Optional[str]]:
     """
-    Detect syntactically invented / non-existent version tags.
-
-    Strategy: query the Docker Hub tags API for the specific tag the user
-    supplied. If the tag does not exist on the registry the version string
-    is fabricated — a classic supply-chain attack vector where an attacker
-    registers a plausible-sounding but fake version to shadow a real one.
-
-    This catches things like:
-        nginx:1.999.0      — version that never existed
-        python:3.11.99     — invented patch level
-        ubuntu:99.04       — non-existent release string
-
-    Falls back gracefully to True (safe) on network failure so it never
-    blocks a scan when the registry is unreachable.
-
-    Args:
-        image_name: Full image reference (e.g., "nginx:1.25.3").
-
-    Returns:
-        Tuple of (tag_is_fake, warning_message | None).
-        tag_is_fake=True  → the tag does not exist; treat as high-risk.
-        tag_is_fake=False → tag confirmed real, or check inconclusive.
+    Detect syntactically invented / non-existent version tags across OCI registries.
     """
-    namespace, repo, tag = _parse_image_ref(image_name)
-
-    # Digest-pinned refs carry no mutable tag — skip this check
-    if "@sha256:" in image_name:
-        return False, None
-
-    # "latest" is always present on official images; skip fabrication check
-    if tag == "latest":
-        return False, None
-
-    url = f"https://hub.docker.com/v2/repositories/{namespace}/{repo}/tags/{tag}/"
-    try:
-        resp = requests.get(url, timeout=5)
-        if resp.status_code == 404:
-            return True, (
-                f"🚨 Fake Version Tag: '{tag}' does not exist for image "
-                f"'{namespace}/{repo}' on Docker Hub. "
-                f"This version string appears to be fabricated — possible "
-                f"shadow-tag injection or supply chain manipulation."
-            )
-        if resp.status_code == 200:
-            logger.info("Tag '%s' confirmed real on registry for '%s/%s'.", tag, namespace, repo)
-            return False, None
-        # Any other HTTP status — inconclusive, default safe
-        return False, None
-    except requests.RequestException as e:
-        logger.warning("Fake-tag check network failure for '%s': %s", image_name, e)
-        return False, None
+    return check_registry_tag_exists(image_name)
 
 
 # ── Gate 2: Supply chain tag-poisoning detection ──────────────────────────────
@@ -186,53 +113,9 @@ def _resolve_local_digest(image_name: str) -> Optional[str]:
 
 def _fetch_registry_digest(image_name: str) -> Optional[str]:
     """
-    Fetch the current content-digest for a tag from Docker Hub's registry API
-    (not the Hub UI API — the actual OCI distribution endpoint).
-
-    Uses an anonymous token for public images. Returns None on any failure.
-
-    The digest returned is what Docker Hub currently serves for that tag.
-    If it has drifted from what was originally pulled, the tag was overwritten.
+    Fetch the current content-digest for a tag across Docker Hub, GHCR, Quay, ECR, GCR, etc.
     """
-    namespace, repo, tag = _parse_image_ref(image_name)
-
-    # Step 1: get an anonymous Bearer token for the target repo
-    auth_url = (
-        f"https://auth.docker.io/token"
-        f"?service=registry.docker.io"
-        f"&scope=repository:{namespace}/{repo}:pull"
-    )
-    try:
-        token_resp = requests.get(auth_url, timeout=5)
-        if token_resp.status_code != 200:
-            return None
-        token = token_resp.json().get("token")
-        if not token:
-            return None
-    except requests.RequestException as e:
-        logger.warning("Registry auth token fetch failed: %s", e)
-        return None
-
-    # Step 2: HEAD the manifest — Docker returns the content-digest in headers
-    manifest_url = f"https://registry-1.docker.io/v2/{namespace}/{repo}/manifests/{tag}"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        # Request the canonical manifest media types so the digest is stable
-        "Accept": (
-            "application/vnd.docker.distribution.manifest.v2+json,"
-            "application/vnd.oci.image.manifest.v1+json"
-        ),
-    }
-    try:
-        resp = requests.head(manifest_url, headers=headers, timeout=8)
-        if resp.status_code == 200:
-            digest = resp.headers.get("Docker-Content-Digest") or resp.headers.get("Etag", "").strip('"')
-            if digest and digest.startswith("sha256:"):
-                return digest
-    except requests.RequestException as e:
-        logger.warning("Registry manifest HEAD failed for '%s': %s", image_name, e)
-
-    return None
+    return fetch_registry_digest(image_name)
 
 
 def check_tag_poisoning(image_name: str) -> tuple[bool, Optional[str]]:
@@ -538,6 +421,8 @@ def verify_image(image_name: str) -> IntegrityResult:
         digest_warning=digest_warning,
         typosquat_risk=typosquat_risk,
         typosquat_warning=typosquat_warning,
+        tag_poisoned=tag_poisoned,
+        poison_warning=poison_warning,
     )
 
     logger.info(

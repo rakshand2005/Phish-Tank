@@ -9,15 +9,15 @@ Welcome to Phish Net! This guide provides step-by-step instructions on how to se
 Before you start, ensure you have the following installed on your machine:
 
 - **Git**
-- **Docker Desktop** or Docker Engine (Required for running the scanner container)
+- **Docker Desktop** or Docker Engine (Required for running the Phish Net container)
 
-*Note: The core engines behind this tool (Trivy and Cosign) are bundled inside our Docker image. You do **not** need to install them on your host machine to evaluate the scanner.*
+*Note: The core engines behind this tool (Trivy and Cosign) are bundled inside the Phish Net image. You do **not** need to install them on your host machine to evaluate Phish Net.*
 
 ---
 
 ## 2. Quick Setup
 
-The easiest and most robust way to evaluate the scanner is by building and running its Docker image.
+The easiest and most robust way to evaluate Phish Net is by building and running its Docker image.
 
 ### Step 1: Clone the Repository
 ```bash
@@ -28,51 +28,61 @@ cd Phish-Tank
 ### Step 2: Build the Docker Image
 Run this command from the root of the project directory:
 ```bash
-docker build -t phish-net:latest .
+docker build -t phishnet:latest .
 ```
 
 ---
 
-## 3. Running the Scanner
+## 3. Running Phish Net
 
-To run the scanner, you must mount your local Docker socket. This allows the containerized scanner to inspect image layers and detect local vulnerabilities.
+To run Phish Net, you must mount your local Docker socket. This allows the containerized tool to inspect image layers and detect local vulnerabilities.
 
 ### Full Vulnerability Scan
 Run a full scan including integrity checks, SBOM generation, CVE matching, EPSS/KEV risk scoring, and layer attribution.
 
 **On Windows (PowerShell or Command Prompt):**
 ```bash
-docker run --rm -v //var/run/docker.sock:/var/run/docker.sock phish-net:latest scan nginx:1.14
+docker run --rm -v //var/run/docker.sock:/var/run/docker.sock phishnet:latest scan nginx:1.14
 ```
 *(Note the double slash `//var/run/docker.sock` which prevents path mangling on Windows).*
 
 **On Linux/macOS:**
 ```bash
-docker run --rm -v /var/run/docker.sock:/var/run/docker.sock phish-net:latest scan nginx:1.14
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock phishnet:latest scan nginx:1.14
 ```
 
 ### JSON Output Format
-Useful for integrating the scanner into CI/CD pipelines or piping data to other reporting tools:
+Useful for integrating Phish Net into CI/CD pipelines or piping data to other reporting tools:
 ```bash
-docker run --rm -v //var/run/docker.sock:/var/run/docker.sock phish-net:latest scan nginx:1.14 --output json
+docker run --rm -v //var/run/docker.sock:/var/run/docker.sock phishnet:latest scan nginx:1.14 --output json
 ```
 
 ### CI Gate Logic
-Test the scanner's ability to block a CI/CD pipeline if critical vulnerabilities (based on CVSS, EPSS, and active exploitation) are found:
+Test Phish Net's ability to block a CI/CD pipeline if critical vulnerabilities (based on CVSS, EPSS, and active exploitation) are found:
 ```bash
-docker run --rm -v //var/run/docker.sock:/var/run/docker.sock phish-net:latest scan nginx:1.14 --fail-on CRITICAL
+docker run --rm -v //var/run/docker.sock:/var/run/docker.sock phishnet:latest scan nginx:1.14 --fail-on CRITICAL
 ```
+
+### Source Dependency Scan
+Scan application dependency manifests and lockfiles before building an image.
+The project directory must be mounted into the tool container:
+```bash
+docker run --rm -v "$(pwd):/workspace" -w /workspace phishnet:latest scan-dir .
+```
+This scans language libraries only; Docker image integrity checks and layer
+attribution apply only to `scan <image>`. Commit lockfiles when possible because
+Trivy cannot reliably match an unpinned version range to a CVE.
 
 ### Integrity Checks Only
 If you only want to verify image signatures, SLSA provenance, digest pinning, and typosquatting without running a full CVE scan:
 ```bash
-docker run --rm -v //var/run/docker.sock:/var/run/docker.sock phish-net:latest integrity nginx:1.14
+docker run --rm -v //var/run/docker.sock:/var/run/docker.sock phishnet:latest integrity nginx:1.14
 ```
 
-### Auto-Remediation (scanner fix)
+### Auto-Remediation (phishnet fix)
 Generates a patched Dockerfile that upgrades the base image, pins vulnerable package versions, adds a non-root user, and adds a HEALTHCHECK instruction.
 ```bash
-docker run --rm -v //var/run/docker.sock:/var/run/docker.sock phish-net:latest fix nginx:1.14
+docker run --rm -v //var/run/docker.sock:/var/run/docker.sock phishnet:latest fix nginx:1.14
 ```
 
 To save the patched Dockerfile to a local directory:
@@ -80,7 +90,7 @@ To save the patched Dockerfile to a local directory:
 docker run --rm \
   -v //var/run/docker.sock:/var/run/docker.sock \
   -v $(pwd)/patched:/output \
-  phish-net:latest fix nginx:1.14 --output-dir /output
+  phishnet:latest fix nginx:1.14 --output-dir /output
 ```
 
 ---
@@ -103,7 +113,7 @@ If you wish to run the Python code directly on your host machine without Docker 
    ```
 4. **Run the CLI:**
    ```bash
-   scanner --help
+   phishnet --help
    ```
 
 ---

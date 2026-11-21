@@ -23,7 +23,7 @@ if ! command -v docker &> /dev/null; then
     exit 1
 fi
 
-echo "📦 Pulling scanner image from GitHub Container Registry..."
+echo "📦 Pulling Phish Net image from GitHub Container Registry..."
 docker pull "${IMAGE}"
 
 echo ""
@@ -39,12 +39,13 @@ elif [ -f "$HOME/.bash_profile" ]; then
     SHELL_CONFIG="$HOME/.bash_profile"
 fi
 
-# Create the alias
-ALIAS_CMD="alias phishnet='docker run --rm -v /var/run/docker.sock:/var/run/docker.sock ${IMAGE}'"
+# Create a shell function so the caller's current directory is available to
+# scan-dir inside the container as /workspace.
+ALIAS_CMD="phishnet() { docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v \"\$PWD:/workspace\" -w /workspace ${IMAGE} \"\$@\"; }"
 
 if [ -n "$SHELL_CONFIG" ]; then
     # Remove old alias if it exists
-    grep -v "alias phishnet=" "$SHELL_CONFIG" > "$SHELL_CONFIG.tmp" 2>/dev/null || true
+    grep -vE "alias phishnet=|^phishnet\\(\\)" "$SHELL_CONFIG" > "$SHELL_CONFIG.tmp" 2>/dev/null || true
     mv "$SHELL_CONFIG.tmp" "$SHELL_CONFIG"
 
     # Add new alias
@@ -63,6 +64,7 @@ echo "✅ Installation complete!"
 echo ""
 echo "   Usage:"
 echo "     phishnet scan nginx:1.14"
+echo "     phishnet scan-dir ."
 echo "     phishnet scan nginx:1.14 --output json"
 echo "     phishnet scan nginx:1.14 --fail-on CRITICAL"
 echo "     phishnet integrity nginx:1.14"

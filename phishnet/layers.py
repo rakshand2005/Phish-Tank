@@ -11,15 +11,20 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-import docker
-from docker.errors import DockerException, ImageNotFound
+try:
+    import docker
+    from docker.errors import DockerException, ImageNotFound
+except ImportError:
+    docker = None
+    DockerException = Exception  # type: ignore
+    ImageNotFound = Exception    # type: ignore
 
-from scanner.models import CVEMatch, LayerInfo
+from phishnet.models import CVEMatch, LayerInfo
 
 logger = logging.getLogger(__name__)
 
 
-def get_docker_client() -> docker.DockerClient:
+def get_docker_client():
     """
     Create a Docker SDK client.
 
@@ -29,6 +34,11 @@ def get_docker_client() -> docker.DockerClient:
     Raises:
         RuntimeError: If Docker daemon is not available.
     """
+    if docker is None:
+        raise RuntimeError(
+            "docker SDK is not installed in Python environment.\n"
+            "Install with 'pip install docker' or run Phish Net via Docker."
+        )
     try:
         client = docker.from_env()
         client.ping()
@@ -107,12 +117,8 @@ def get_layer_metadata(image_name: str) -> list[LayerInfo]:
         # Clean up the command string
         command = _clean_layer_command(created_by)
 
-        # Only real layers (non-empty) have a diff ID
+        # Only real layers (non-empty) have a diff ID in inspect RootFS
         if size > 0 and real_layer_idx >= 0:
-            layer_id = diff_ids[real_layer_idx]
-            real_layer_idx -= 1
-        elif real_layer_idx >= 0:
-            # Some empty layers still get diff IDs
             layer_id = diff_ids[real_layer_idx]
             real_layer_idx -= 1
         else:
@@ -208,7 +214,43 @@ def generate_fix_suggestions(
 
 def _build_fix_suggestion(cve: CVEMatch) -> Optional[str]:
     """Build a human-readable fix suggestion for a single CVE."""
-    cmd = cve.layer_command.lower()
+    cmd = (cve.layer_command or "").lower()
+    pkg_type = getattr(cve, "pkg_type", "os")
+    target = getattr(cve, "target_path", "") or ""
+
+    # Application package: Python
+    if pkg_type == "python" or "pip install" in cmd or "pip3 install" in cmd:
+        target_info = f" in {target}" if target else ""
+        return (
+            f"🔧 Python package vulnerability: {cve.package} {cve.installed_version}\n"
+            f"   Fix: Pin or upgrade{target_info}:\n"
+            f"   RUN pip install {cve.package}>={cve.fixed_version}"
+        )
+
+    # Application package: Node.js
+    if pkg_type == "node" or "npm install" in cmd or "npm i " in cmd or "yarn add" in cmd:
+        target_info = f" in {target}" if target else " in package.json"
+        return (
+            f"🔧 Node.js package vulnerability: {cve.package} {cve.installed_version}\n"
+            f"   Fix: Update dependency{target_info}:\n"
+            f"   npm install {cve.package}@{cve.fixed_version}"
+        )
+
+    # Application package: Java
+    if pkg_type == "java":
+        target_info = f" in {target}" if target else " in pom.xml / build.gradle"
+        return (
+            f"🔧 Java dependency vulnerability: {cve.package} {cve.installed_version}\n"
+            f"   Fix: Update dependency version{target_info} to >={cve.fixed_version}"
+        )
+
+    # Application package: Go
+    if pkg_type == "go":
+        return (
+            f"🔧 Go module vulnerability: {cve.package} {cve.installed_version}\n"
+            f"   Fix: Update module in go.mod:\n"
+            f"   go get {cve.package}@{cve.fixed_version}"
+        )
 
     # CVE from base image (FROM instruction)
     if cmd.startswith("from ") or "add file:" in cmd:
@@ -236,26 +278,10 @@ def _build_fix_suggestion(cve: CVEMatch) -> Optional[str]:
             f"   RUN apk add {cve.package}={cve.fixed_version}"
         )
 
-    # CVE from pip install
-    if "pip install" in cmd or "pip3 install" in cmd:
-        return (
-            f"🔧 Python package: {cve.package} {cve.installed_version}\n"
-            f"   Fix: Pin to fixed version:\n"
-            f"   RUN pip install {cve.package}>={cve.fixed_version}"
-        )
-
-    # CVE from npm install
-    if "npm install" in cmd or "npm i " in cmd or "yarn add" in cmd:
-        return (
-            f"🔧 Node package: {cve.package} {cve.installed_version}\n"
-            f"   Fix: Update in package.json:\n"
-            f"   {cve.package}: \">={cve.fixed_version}\""
-        )
-
     # Generic fix suggestion
     return (
         f"🔧 Upgrade {cve.package}: {cve.installed_version} → {cve.fixed_version}\n"
-        f"   Introduced by layer: {cve.layer_command[:80]}"
+        f"   Introduced by layer: {cve.layer_command[:80] if cve.layer_command else 'Unknown'}"
     )
 
 

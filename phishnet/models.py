@@ -1,5 +1,5 @@
 """
-Shared data models (contract) for the Container Security Scanner.
+Shared data models (contract) for Phish Net.
 
 This module defines the data structures that flow through the pipeline:
     integrity.py → sbom.py → matcher.py → layers.py → main.py → P3/P4
@@ -28,11 +28,13 @@ class IntegrityResult:
     digest_warning: Optional[str] = None
     typosquat_risk: bool = False
     typosquat_warning: Optional[str] = None
+    tag_poisoned: bool = False
+    poison_warning: Optional[str] = None
 
     @property
     def passed(self) -> bool:
         """True if no critical integrity issues were found."""
-        return not self.typosquat_risk
+        return not self.typosquat_risk and not self.tag_poisoned
 
     @property
     def warnings(self) -> list[str]:
@@ -46,6 +48,8 @@ class IntegrityResult:
             result.append(self.digest_warning)
         if self.typosquat_warning:
             result.append(self.typosquat_warning)
+        if self.poison_warning:
+            result.append(self.poison_warning)
         return result
 
 
@@ -74,7 +78,8 @@ class CVEMatch:
     layer_command: Optional[str] = None
     description: str = ""
     fix_suggestion: Optional[str] = None
-    # Add to CVEMatch dataclass:
+    pkg_type: str = "os"  # "os", "python", "node", "java", "go", "ruby", "rust"
+    target_path: Optional[str] = None  # e.g. "requirements.txt", "package.json"
     epss_score:     float = 0.0
     in_kev:         bool  = False
     priority_score: float = 0.0
@@ -120,6 +125,8 @@ class ScanResult:
     tag: str
     integrity: IntegrityResult
     db_freshness: DBFreshnessResult
+    target_kind: str = "image"  # "image" or "filesystem"
+    target: Optional[str] = None
     total_packages: int = 0
     packages: list[Package] = field(default_factory=list)
     cves: list[CVEMatch] = field(default_factory=list)
@@ -150,6 +157,31 @@ class ScanResult:
     def fixable_count(self) -> int:
         """Number of CVEs that have a known fix."""
         return sum(1 for cve in self.cves if cve.is_fixable)
+
+    @property
+    def package_type_counts(self) -> dict[str, int]:
+        """Count packages by ecosystem (os, python, node, java, etc.)."""
+        counts: dict[str, int] = {}
+        for pkg in self.packages:
+            t = pkg.pkg_type or "unknown"
+            counts[t] = counts.get(t, 0) + 1
+        return counts
+
+    @property
+    def cve_type_counts(self) -> dict[str, int]:
+        """Count CVEs by package type/ecosystem."""
+        counts: dict[str, int] = {}
+        for cve in self.cves:
+            t = getattr(cve, "pkg_type", "os") or "os"
+            counts[t] = counts.get(t, 0) + 1
+        return counts
+
+    @property
+    def display_target(self) -> str:
+        """Human-readable target name for reports."""
+        if self.target:
+            return self.target
+        return f"{self.image}:{self.tag}" if self.tag else self.image
 
     def to_dict(self) -> dict:
         """Convert to a JSON-serializable dictionary."""

@@ -5,7 +5,7 @@
 # Builds the Docker image and pushes it to ghcr.io/<owner>/<repo>
 # ──────────────────────────────────────────────────────────────────
 
-name: Build & Publish Scanner
+name: Build & Publish Phish Net
 
 on:
   push:
@@ -56,9 +56,9 @@ jobs:
       - name: Test the built image
         if: github.event_name == 'pull_request'
         run: |
-          docker build -t scanner-test .
-          docker run --rm scanner-test --help
-          echo "✅ Scanner image built and tested successfully"
+          docker build -t phishnet-test .
+          docker run --rm phishnet-test --help
+          echo "✅ Phish Net image built and tested successfully"
 
   # ── Smoke test: scan a known vulnerable image ──
   smoke-test:
@@ -77,7 +77,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Run scanner on nginx:1.14 (should find vulnerabilities)
+      - name: Run Phish Net on nginx:1.14 (should find vulnerabilities)
         run: |
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \

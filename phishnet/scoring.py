@@ -11,7 +11,7 @@ the CI gate should block the build.
 
 Drop-in usage inside main.py (Step 4.5, after parse_cve_matches):
 
-    from scanner.scoring import enrich_and_score, gate_decision
+    from phishnet.scoring import enrich_and_score, gate_decision
 
     cves = parse_cve_matches(trivy_json)
     cves = enrich_and_score(cves)           # adds .priority_score etc.
@@ -31,6 +31,8 @@ from typing import Optional
 
 import requests
 
+from phishnet.registry import fetch_registry_digest, fetch_latest_tag_from_registry
+
 logger = logging.getLogger(__name__)
 
 # ── Tuneable weights ────────────────────────────────────────────────────────
@@ -44,7 +46,8 @@ W_EPSS = 0.35
 W_KEV  = 0.40
 
 # CI gate: block if any CVE exceeds this threshold (0–10 scale)
-GATE_THRESHOLD = 7.0
+# Threshold set to 6.0 so critical non-KEV vulnerabilities (CVSS 10, high EPSS) can block
+GATE_THRESHOLD = 6.0
 
 # API endpoints
 EPSS_API   = "https://api.first.org/data/v1/epss"
@@ -77,6 +80,8 @@ class ScoredCVE:
     layer_command:     Optional[str]
     description:       str
     fix_suggestion:    Optional[str]
+    pkg_type:          str   = "os"
+    target_path:       Optional[str] = None
 
     # ── enrichment ──
     epss_score:        float = 0.0   # 0.0–1.0 from FIRST.org
@@ -91,7 +96,7 @@ class ScoredCVE:
 
     @property
     def blocks_ci(self) -> bool:
-        return self.priority_score >= GATE_THRESHOLD
+        return self.priority_score >= GATE_THRESHOLD or self.in_kev or self.tag_poisoned
 
     @property
     def is_fixable(self) -> bool:
@@ -105,8 +110,9 @@ class ScoredCVE:
         kev_contrib  = (1.0 if self.in_kev else 0.0) * W_KEV * 10
         kev_flag     = "YES (CISA KEV)" if self.in_kev else "no"
         poison_flag  = " | ⚠️ SUPPLY CHAIN POISONED (×1.50)" if self.tag_poisoned else ""
+        type_badge   = f"[{self.pkg_type.upper()}] " if self.pkg_type != "os" else ""
         return (
-            f"CVSS {self.cvss_score:.1f} (+{cvss_contrib:.2f}) | "
+            f"{type_badge}CVSS {self.cvss_score:.1f} (+{cvss_contrib:.2f}) | "
             f"EPSS {self.epss_score:.4f} (+{epss_contrib:.2f}) | "
             f"KEV {kev_flag} (+{kev_contrib:.2f}) "
             f"→ priority {self.priority_score:.2f}/10{poison_flag}"
@@ -201,28 +207,9 @@ def _fetch_kev_with_dates() -> dict[str, str]:
 
 def fetch_latest_version_from_registry(image_name: str) -> str:
     """
-    Queries Docker Hub API to pull the most recent tag release for an image.
-
-    Uses the library (official) namespace. For unofficial images the caller
-    should strip the namespace prefix before passing the base name.
-
-    Args:
-        image_name: Full image reference (e.g., "nginx:1.14" or "nginx").
-
-    Returns:
-        The latest tag name as a string, or "unknown" on any failure.
+    Queries Docker Hub or any OCI Registry API to pull the most recent tag release for an image.
     """
-    base_name = image_name.split(":")[0].split("/")[-1]
-    url = f"https://hub.docker.com/v2/repositories/library/{base_name}/tags/?page_size=1"
-    try:
-        res = requests.get(url, timeout=5)
-        if res.status_code == 200:
-            results = res.json().get("results", [])
-            if results:
-                return results[0].get("name", "unknown")
-    except requests.RequestException as e:
-        logger.warning("Registry version fetch failed for '%s': %s", image_name, e)
-    return "unknown"
+    return fetch_latest_tag_from_registry(image_name)
 
 
 def _version_outdated_multiplier(installed_version: str, image_name: str) -> float:
@@ -230,16 +217,9 @@ def _version_outdated_multiplier(installed_version: str, image_name: str) -> flo
     Returns a score multiplier based on how outdated the installed version is.
 
     Compares the installed_version against the latest tag fetched from
-    Docker Hub. If they differ, applies a penalty multiplier:
-        - Same version or unknown  →  1.0  (no change)
+    the registry. If they differ, applies a penalty multiplier:
+        - Same version or unknown   →  1.0  (no change)
         - Version mismatch detected →  1.25 (25 % boost; unpatched vector)
-
-    Args:
-        installed_version: The version string from CVEMatch (e.g., "1.14.2").
-        image_name:        The package/image name to query Docker Hub for.
-
-    Returns:
-        A float multiplier ≥ 1.0.
     """
     latest = fetch_latest_version_from_registry(image_name)
     if latest == "unknown":
@@ -251,7 +231,7 @@ def _version_outdated_multiplier(installed_version: str, image_name: str) -> flo
             "Version outdated for '%s': installed=%s, latest=%s — applying patch multiplier.",
             image_name, installed_version, latest,
         )
-        return 1.25  # Configurable: raise this for stricter posture
+        return 1.25
 
     return 1.0
 
@@ -267,20 +247,10 @@ def _check_digest_drift(image_name: str) -> bool:
     """
     Returns True if the locally-pulled digest of image_name no longer matches
     the digest currently served by the registry (tag was silently overwritten).
-
-    This is the scoring-side counterpart to integrity.check_tag_poisoning().
-    Results are cached per image_name for the lifetime of the scan session so
-    we don't hammer the registry with one HEAD request per CVE.
-
-    Returns False (safe) if docker is unavailable, the image is not pulled
-    locally, or the registry is unreachable — never raises false positives
-    due to infra unavailability.
     """
     if image_name in _digest_cache:
         return _digest_cache[image_name]
 
-    # Inline the same two-step digest resolution used in integrity.py so that
-    # scoring.py remains self-contained (no cross-module import cycle).
     import subprocess, re as _re
 
     def _local_digest(name: str) -> Optional[str]:
@@ -297,35 +267,8 @@ def _check_digest_drift(image_name: str) -> bool:
             pass
         return None
 
-    def _registry_digest(name: str) -> Optional[str]:
-        parts  = name.split("@")[0]
-        base, tag = (parts.rsplit(":", 1) if ":" in parts.split("/")[-1] else (parts, "latest"))
-        segs   = base.split("/")
-        ns, repo = ("library", segs[0]) if len(segs) == 1 else (segs[0], segs[1])
-        try:
-            tok = requests.get(
-                f"https://auth.docker.io/token?service=registry.docker.io"
-                f"&scope=repository:{ns}/{repo}:pull", timeout=5,
-            ).json().get("token")
-            if not tok:
-                return None
-            resp = requests.head(
-                f"https://registry-1.docker.io/v2/{ns}/{repo}/manifests/{tag}",
-                headers={
-                    "Authorization": f"Bearer {tok}",
-                    "Accept": (
-                        "application/vnd.docker.distribution.manifest.v2+json,"
-                        "application/vnd.oci.image.manifest.v1+json"
-                    ),
-                }, timeout=8,
-            )
-            d = resp.headers.get("Docker-Content-Digest", "")
-            return d if d.startswith("sha256:") else None
-        except requests.RequestException:
-            return None
-
-    local    = _local_digest(image_name)
-    registry = _registry_digest(image_name)
+    local = _local_digest(image_name)
+    registry = fetch_registry_digest(image_name)
 
     drifted = bool(local and registry and local != registry)
     if drifted:
@@ -333,6 +276,9 @@ def _check_digest_drift(image_name: str) -> bool:
             "SCORING: digest drift detected for '%s' — local=%s registry=%s",
             image_name, local, registry,
         )
+
+    _digest_cache[image_name] = drifted
+    return drifted
 
     _digest_cache[image_name] = drifted
     return drifted
@@ -387,7 +333,7 @@ def _risk_label(score: float) -> str:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def enrich_and_score(cves: list) -> list[ScoredCVE]:
+def enrich_and_score(cves: list, image_name: Optional[str] = None) -> list[ScoredCVE]:
     """
     Main entry point for Person 3.
 
@@ -399,7 +345,8 @@ def enrich_and_score(cves: list) -> list[ScoredCVE]:
         2. One CISA KEV download (~200 KB JSON, cached for the session)
 
     Args:
-        cves: list[CVEMatch] from scanner.matcher.parse_cve_matches()
+        cves: list[CVEMatch] from phishnet.matcher.parse_cve_matches()
+        image_name: Optional full container image reference (e.g. "nginx:1.14")
 
     Returns:
         list[ScoredCVE] enriched and sorted by priority_score desc.
@@ -408,6 +355,18 @@ def enrich_and_score(cves: list) -> list[ScoredCVE]:
         return []
 
     logger.info("Enriching %d CVEs with EPSS and CISA KEV data...", len(cves))
+
+    # ── Image-level multipliers ──
+    # Check tag poisoning (digest drift) once per container image
+    poison_mult = 1.0
+    version_mult = 1.0
+    if image_name:
+        if _check_digest_drift(image_name):
+            poison_mult = 1.50
+        # Check if container image tag lags latest release
+        parts = image_name.split("@")[0]
+        tag = parts.rsplit(":", 1)[1] if ":" in parts.split("/")[-1] else "latest"
+        version_mult = _version_outdated_multiplier(tag, image_name)
 
     # ── 1. Collect all unique CVE IDs ──
     cve_ids = list({c.cve_id.upper() for c in cves})
@@ -433,14 +392,6 @@ def enrich_and_score(cves: list) -> list[ScoredCVE]:
         in_kev   = cid in kev_data
         kev_date = kev_data.get(cid)
 
-        # ── version-lag multiplier from Docker Hub ─────────────────────────
-        version_mult = _version_outdated_multiplier(cve.installed_version, cve.package)
-
-        # ── supply chain poison multiplier (digest drift check) ────────────
-        # 1.50 multiplier when the image tag has been silently overwritten.
-        # Cached per image_name so only one registry round-trip per image.
-        poison_mult = 1.50 if _check_digest_drift(cve.package) else 1.0
-
         priority = _compute_priority(cve.cvss_score, epss, in_kev, version_mult, poison_mult)
 
         scored.append(ScoredCVE(
@@ -455,6 +406,8 @@ def enrich_and_score(cves: list) -> list[ScoredCVE]:
             layer_command     = cve.layer_command,
             description       = cve.description,
             fix_suggestion    = cve.fix_suggestion,
+            pkg_type          = getattr(cve, "pkg_type", "os"),
+            target_path       = getattr(cve, "target_path", None),
             # enrichment
             epss_score        = epss,
             epss_percentile   = pct,
@@ -508,7 +461,7 @@ def gate_decision(scored_cves: list[ScoredCVE]) -> tuple[int, str]:
     return 1, reason
 
 
-# ── Quick self-test (run: python -m scanner.scoring) ─────────────────────────
+# ── Quick self-test (run: python -m phishnet.scoring) ────────────────────────
 
 if __name__ == "__main__":
 
