@@ -1,15 +1,15 @@
 """
-Container Security Scanner — CLI Entry Point.
+Phish Net — CLI Entry Point.
 
 Orchestrates the full scanning pipeline:
     integrity → SBOM → CVE matching → scoring → layer attribution
 
 Usage:
-    scanner scan nginx:1.14
-    scanner scan nginx:1.14 --output json
-    scanner scan nginx:1.14 --fail-on CRITICAL
-    scanner integrity nginx:1.14
-    scanner fix nginx:1.14
+    phishnet scan nginx:1.14
+    phishnet scan nginx:1.14 --output json
+    phishnet scan nginx:1.14 --fail-on CRITICAL
+    phishnet integrity nginx:1.14
+    phishnet fix nginx:1.14
 """
 from __future__ import annotations
 
@@ -17,25 +17,38 @@ import json
 import logging
 import sys
 from datetime import datetime
+from pathlib import Path
 
 import click
-from rich.console import Console
-from rich.table import Table
-from rich.panel import Panel
-from rich.text import Text
-from rich.columns import Columns
-from rich.layout import Layout
-from rich.rule import Rule
-from rich import box
+try:
+    from rich.console import Console
+    from rich.table import Table
+    from rich.panel import Panel
+    from rich.text import Text
+    from rich.columns import Columns
+    from rich.layout import Layout
+    from rich.rule import Rule
+    from rich import box
+    HAS_RICH = True
+except ImportError:
+    HAS_RICH = False
+    class Console:  # type: ignore
+        def print(self, *args, **kwargs):
+            if args:
+                print(*args)
+        def status(self, *args, **kwargs):
+            from contextlib import nullcontext
+            return nullcontext()
+    Table = Panel = Text = Columns = Layout = Rule = box = None  # type: ignore
 
-from scanner import __version__
-from scanner.models import ScanResult
-from scanner.integrity import verify_image
-from scanner.sbom import generate_sbom, get_packages
-from scanner.matcher import check_db_freshness, update_db as _update_trivy_db, scan_cves, parse_cve_matches
-from scanner.layers import get_layer_metadata, attribute_cves_to_layers, generate_fix_suggestions
-from scanner.scoring import enrich_and_score, gate_decision
-from scanner.remediate import (
+from phishnet import __version__
+from phishnet.models import IntegrityResult, ScanResult
+from phishnet.integrity import verify_image
+from phishnet.sbom import generate_sbom, get_packages
+from phishnet.matcher import check_db_freshness, update_db as _update_trivy_db, scan_cves, parse_cve_matches
+from phishnet.layers import get_layer_metadata, attribute_cves_to_layers, generate_fix_suggestions
+from phishnet.scoring import enrich_and_score, gate_decision
+from phishnet.remediate import (
     reconstruct_dockerfile,
     build_remediation_plan,
     generate_patched_dockerfile,
@@ -44,7 +57,7 @@ from scanner.remediate import (
 )
 
 console = Console()
-logger = logging.getLogger("scanner")
+logger = logging.getLogger("phishnet")
 
 
 def _setup_logging(verbose: bool) -> None:
@@ -91,7 +104,7 @@ def _severity_block(severity: str) -> str:
 
 
 def _print_banner() -> None:
-    """Print the scanner banner with ASCII art."""
+    """Print the Phish Net banner with ASCII art."""
     art = Text()
     art.append("\n")
     art.append("   ███████╗ ██████╗ █████╗ ███╗   ██╗███╗   ██╗███████╗██████╗ \n", style="bold cyan")
@@ -101,7 +114,7 @@ def _print_banner() -> None:
     art.append("   ███████║╚██████╗██║  ██║██║ ╚████║██║ ╚████║███████╗██║  ██║\n", style="bold blue")
     art.append("   ╚══════╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝\n", style="bold blue")
     art.append("\n")
-    art.append("   🛡️  Container Security Scanner", style="bold white")
+    art.append("   🛡️  Phish Net", style="bold white")
     art.append(f"  v{__version__}\n", style="dim")
     art.append("   SBOM Generation · CVE Matching · Auto-Remediation\n", style="dim italic")
     console.print(Panel(art, border_style="cyan", box=box.DOUBLE))
@@ -158,7 +171,7 @@ def _print_summary(result: ScanResult) -> None:
 
     # ── Stats Table ──
     summary = Table(
-        title=f"📊 Scan Summary: {result.image}:{result.tag}",
+        title=f"📊 Scan Summary: {result.display_target}",
         box=box.ROUNDED,
         title_style="bold white",
         border_style="cyan",
@@ -167,6 +180,12 @@ def _print_summary(result: ScanResult) -> None:
     summary.add_column("Value", justify="right", min_width=10)
 
     summary.add_row("Total Packages", str(result.total_packages))
+    pkg_types = result.package_type_counts
+    if pkg_types:
+        summary.add_row(
+            "Ecosystems",
+            ", ".join(f"{t.upper()}: {c}" for t, c in sorted(pkg_types.items())),
+        )
     summary.add_row("Total CVEs", Text(str(total_cves), style="bold" if total_cves else "green"))
     summary.add_row("Fixable CVEs", Text(str(result.fixable_count), style="green"))
     summary.add_row(
@@ -328,6 +347,7 @@ def _print_cve_table(result: ScanResult, show_layers: bool = False) -> None:
     )
     table.add_column("CVE ID", style="bold", min_width=18)
     table.add_column("Severity", justify="center", min_width=10)
+    table.add_column("Type", justify="center", min_width=8, style="cyan")
     table.add_column("Package", min_width=15)
     table.add_column("Installed", min_width=10)
     table.add_column("Fixed", min_width=10)
@@ -344,10 +364,12 @@ def _print_cve_table(result: ScanResult, show_layers: bool = False) -> None:
         # ScoredCVE has priority_score and in_kev; CVEMatch falls back safely
         priority = f"{cve.priority_score:.2f}" if hasattr(cve, "priority_score") else "—"
         kev_flag = Text("YES", style="bold red") if getattr(cve, "in_kev", False) else Text("—", style="dim")
+        pkg_type_label = getattr(cve, "pkg_type", "os").upper()
 
         row = [
             cve.cve_id,
             severity_text,
+            pkg_type_label,
             cve.package,
             cve.installed_version,
             str(fixed),
@@ -421,7 +443,7 @@ def _print_layer_breakdown(result: ScanResult) -> None:
 @click.group()
 @click.version_option(version=__version__, prog_name="phishnet")
 def cli():
-    """🛡️  Container Security Scanner — SBOM Generation & CVE Matching"""
+    """🛡️  Phish Net — SBOM Generation & CVE Matching"""
     pass
 
 
@@ -444,11 +466,11 @@ def scan(image: str, output: str, fail_on: str, layers: bool, update_db: bool, v
 
     Examples:
 
-        scanner scan nginx:1.14
+        phishnet scan nginx:1.14
 
-        scanner scan nginx:1.14 --output json
+        phishnet scan nginx:1.14 --output json
 
-        scanner scan nginx:1.14 --fail-on CRITICAL
+        phishnet scan nginx:1.14 --fail-on CRITICAL
     """
     _setup_logging(verbose)
     image_name, tag = _parse_image_name(image)
@@ -465,9 +487,22 @@ def scan(image: str, output: str, fail_on: str, layers: bool, update_db: bool, v
         integrity = verify_image(image)
 
     if integrity.typosquat_risk:
-        console.print(f"  [bold red]🚨 {integrity.typosquat_warning}[/bold red]")
-        if not click.confirm("  Continue anyway?", default=False):
+        if output == "terminal":
+            console.print(f"  [bold red]🚨 {integrity.typosquat_warning}[/bold red]")
+        else:
+            print(f"🚨 {integrity.typosquat_warning}", file=sys.stderr)
+        if not sys.stdin.isatty():
+            logger.error("Non-interactive session detected with typosquat risk: aborting.")
             raise SystemExit(1)
+        elif not click.confirm("  Continue anyway?", default=False):
+            raise SystemExit(1)
+
+    if integrity.tag_poisoned:
+        if output == "terminal":
+            console.print(f"  [bold red]🚨 {integrity.poison_warning or integrity.signature_warning}[/bold red]")
+        else:
+            print(f"🚨 {integrity.poison_warning or integrity.signature_warning}", file=sys.stderr)
+        raise SystemExit(1)
 
     # ── Step 2: DB Freshness Check ──
     if output == "terminal":
@@ -509,9 +544,9 @@ def scan(image: str, output: str, fail_on: str, layers: bool, update_db: bool, v
     #    it fires AFTER layer attribution — not at module level.
     if output == "terminal":
         with console.status("[bold cyan]Enriching CVEs with EPSS and CISA KEV scores..."):
-            cves = enrich_and_score(cves)
+            cves = enrich_and_score(cves, image_name=image)
     else:
-        cves = enrich_and_score(cves)
+        cves = enrich_and_score(cves, image_name=image)
 
     # ── Step 5: Layer Attribution ──
     layer_infos = []
@@ -569,7 +604,7 @@ def scan(image: str, output: str, fail_on: str, layers: bool, update_db: bool, v
             console.print(
                 Panel(
                     "[bold red]🚨 CRITICAL vulnerabilities found! Pipeline should be BLOCKED.\n"
-                    "    Run [bold white]scanner fix {image}[/bold white] to auto-generate a patched Dockerfile.[/bold red]",
+                    f"    Run [bold white]phishnet fix {image}[/bold white] to auto-generate a patched Dockerfile.[/bold red]",
                     border_style="red",
                     box=box.HEAVY,
                 )
@@ -609,6 +644,99 @@ def scan(image: str, output: str, fail_on: str, layers: bool, update_db: bool, v
     sys.exit(0)
 
 
+@cli.command(name="scan-dir")
+@click.argument("directory", type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path))
+@click.option("--output", "-o", type=click.Choice(["terminal", "json"]), default="terminal",
+              help="Output format.")
+@click.option("--fail-on", type=click.Choice(["CRITICAL", "HIGH", "MEDIUM", "LOW"]),
+              default=None, help="Exit with code 1 if CVEs of this severity or higher are found.")
+@click.option("--update-db/--no-update-db", default=False,
+              help="Update Trivy DB before scanning.")
+@click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging.")
+def scan_dir(directory: Path, output: str, fail_on: str, update_db: bool, verbose: bool):
+    """Scan source dependency manifests and lockfiles in DIRECTORY.
+
+    This checks language-library dependencies before an image is built. It does
+    not run image integrity checks or Docker-layer attribution.
+
+    Examples:
+
+        phishnet scan-dir .
+
+        phishnet scan-dir ./service --output json --fail-on HIGH
+    """
+    _setup_logging(verbose)
+    target = str(directory.resolve())
+
+    if output == "terminal":
+        _print_banner()
+        console.print(f"  Scanning source dependencies: [bold cyan]{target}[/bold cyan]\n")
+        console.print("  [dim]Scope: dependency manifests and lockfiles; image integrity and layers are not applicable.[/dim]\n")
+
+    if output == "terminal":
+        with console.status("[bold cyan]Checking vulnerability database..."):
+            db_freshness = check_db_freshness()
+    else:
+        db_freshness = check_db_freshness()
+
+    if update_db or db_freshness.is_stale:
+        if output == "terminal":
+            with console.status("[bold cyan]Updating vulnerability database..."):
+                _update_trivy_db()
+                db_freshness = check_db_freshness()
+        else:
+            _update_trivy_db()
+            db_freshness = check_db_freshness()
+
+    if output == "terminal":
+        with console.status("[bold cyan]Generating dependency SBOM..."):
+            sbom = generate_sbom(target, target_kind="filesystem")
+            packages = get_packages(sbom)
+        with console.status("[bold cyan]Scanning dependency vulnerabilities..."):
+            cves = parse_cve_matches(scan_cves(target, target_kind="filesystem"))
+        with console.status("[bold cyan]Enriching CVEs with EPSS and CISA KEV scores..."):
+            cves = enrich_and_score(cves)
+    else:
+        sbom = generate_sbom(target, target_kind="filesystem")
+        packages = get_packages(sbom)
+        cves = enrich_and_score(parse_cve_matches(scan_cves(target, target_kind="filesystem")))
+
+    result = ScanResult(
+        image=target,
+        tag="",
+        integrity=IntegrityResult(),
+        db_freshness=db_freshness,
+        target_kind="filesystem",
+        target=target,
+        total_packages=len(packages),
+        packages=packages,
+        cves=cves,
+    )
+
+    if output == "json":
+        click.echo(result.to_json())
+    else:
+        _print_db_freshness(result)
+        _print_summary(result)
+        _print_risk_gauge(cves)
+        _print_score_breakdown(cves)
+        _print_cve_table(result)
+
+    exit_code, reason = gate_decision(cves)
+    if exit_code:
+        if output == "terminal":
+            console.print(f"\n  [bold red]CI GATE BLOCKED: {reason}[/bold red]\n")
+        raise SystemExit(1)
+
+    if fail_on:
+        severity_levels = ["CRITICAL", "HIGH", "MEDIUM", "LOW"]
+        blocking_severities = set(severity_levels[:severity_levels.index(fail_on) + 1])
+        if any(c.severity in blocking_severities for c in cves):
+            if output == "terminal":
+                console.print(f"\n  [bold red]CI GATE: CVE at {fail_on} or above found.[/bold red]\n")
+            raise SystemExit(1)
+
+
 @cli.command()
 @click.argument("image")
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging.")
@@ -620,7 +748,7 @@ def integrity(image: str, verbose: bool):
 
     Example:
 
-        scanner integrity nginx:1.14
+        phishnet integrity nginx:1.14
     """
     _setup_logging(verbose)
     _print_banner()
@@ -634,7 +762,7 @@ def integrity(image: str, verbose: bool):
         image=image.split(":")[0],
         tag=image.split(":")[-1] if ":" in image else "latest",
         integrity=result,
-        db_freshness=__import__("scanner.models", fromlist=["DBFreshnessResult"]).DBFreshnessResult(),
+        db_freshness=__import__("phishnet.models", fromlist=["DBFreshnessResult"]).DBFreshnessResult(),
     )
     _print_integrity_results(temp_result)
 
@@ -660,9 +788,9 @@ def fix_command(image: str, output_dir: str, verbose: bool):
 
     Examples:
 
-        scanner fix nginx:1.14
+        phishnet fix nginx:1.14
 
-        scanner fix nginx:1.14 --output-dir ./patched
+        phishnet fix nginx:1.14 --output-dir ./patched
     """
     _setup_logging(verbose)
     _print_banner()
@@ -685,7 +813,7 @@ def fix_command(image: str, output_dir: str, verbose: bool):
         cves = parse_cve_matches(trivy_json)
 
     with console.status("[bold cyan]Enriching CVEs with EPSS and CISA KEV..."):
-        cves = enrich_and_score(cves)
+        cves = enrich_and_score(cves, image_name=image)
 
     with console.status("[bold cyan]Analyzing image layers..."):
         try:
@@ -746,7 +874,7 @@ def fix_command(image: str, output_dir: str, verbose: bool):
             f"   [dim]Next steps:[/dim]\n"
             f"   [cyan]1.[/cyan] Review the patched Dockerfile\n"
             f"   [cyan]2.[/cyan] Build: [bold]docker build -f {saved_path} -t {image_name}:patched .[/bold]\n"
-            f"   [cyan]3.[/cyan] Re-scan: [bold]scanner scan {image_name}:patched[/bold]\n"
+            f"   [cyan]3.[/cyan] Re-scan: [bold]phishnet scan {image_name}:patched[/bold]\n"
             f"   [cyan]4.[/cyan] Compare results to verify CVE reduction",
             border_style="green",
             box=box.DOUBLE,

@@ -3,9 +3,9 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "container-scanner"
+name = "phishnet"
 version = "0.1.0"
-description = "Container Security Scanner — SBOM Generation, CVE Matching & Layer Attribution"
+description = "Phish Net — SBOM Generation, CVE Matching & Layer Attribution"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.9"
@@ -20,7 +20,12 @@ dependencies = [
 ]
 
 [project.scripts]
-phishnet = "scanner.main:main"
+phishnet = "phishnet.main:main"
 
 [tool.setuptools.packages.find]
-include = ["scanner*"]
+include = ["phishnet*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+python_files = ["test*.py"]
+python_functions = ["test*"]

@@ -1,11 +1,11 @@
-# 🛡️ Phish Net - Container Security Scanner
+# 🛡️ Phish Net - Container Security Tool
 
 ## Code Comments & Module Guide
 **v0.1.0 — Team 15**
 
 ---
 
-### `scanner/integrity.py` - Image Integrity Verification
+### `phishnet/integrity.py` - Image Integrity Verification
 * **`verify_image_exists_on_registry(image_name)`**
   Queries the official Docker Registry API to confirm if the namespace/image is a real, registered public artifact or a non-existent typosquat. Makes a live call to Docker Hub API. A 404 response proves the image is fraudulent or typo-squatted. Falls back gracefully on network failure.
 * **`check_fake_version_tag(image_name)`**
@@ -25,8 +25,8 @@
 
 ---
 
-### `scanner/sbom.py` - SBOM Generation
-* **`generate_sbom(image_name, output_dir)`**
+### `phishnet/sbom.py` - SBOM Generation
+* **`generate_sbom(target, output_dir, target_kind)`**
   Runs `trivy image --format cyclonedx` and parses the resulting JSON file. Raises `RuntimeError` on Trivy failure, missing binary, or 300-second timeout. Returns the parsed CycloneDX dictionary.
 * **`get_packages(sbom)`**
   Iterates the components array of a CycloneDX document and converts each entry to a `Package` dataclass. Type classification is delegated to `_classify_package`.
@@ -35,19 +35,19 @@
 
 ---
 
-### `scanner/matcher.py` - CVE Matching
+### `phishnet/matcher.py` - CVE Matching
 * **`check_db_freshness(max_age_hours)`**
   Reads `metadata.json` from Trivy's local cache (checked in three OS-specific locations). Computes DB age in hours. If no metadata file exists, the DB is treated as absent and flagged stale.
 * **`update_db()`**
   Shells out to `trivy db update`. Should be called before `scan_cves()` when `DBFreshnessResult.is_stale` is True, or when `--update-db` is passed.
-* **`scan_cves(image_name)`**
+* **`scan_cves(target, target_kind)`**
   Runs `trivy image --format json` and returns the raw parsed JSON.
 * **`parse_cve_matches(trivy_json)`**
   Traverses the Trivy JSON Results array and converts each Vulnerability entry to a `CVEMatch`. Extracts: CVE ID, package name, installed/fixed versions, severity, CVSS score, and description.
 
 ---
 
-### `scanner/scoring.py` - Risk Scoring & CI Gate
+### `phishnet/scoring.py` - Risk Scoring & CI Gate
 * **Design rationale**
   Three signals combined: CVSS v3 (theoretical severity), EPSS (statistical exploit probability from FIRST.org), CISA KEV (active exploitation flag). KEV gets the highest weight (0.40) because active exploitation is the clearest signal of real-world danger.
 * **`_fetch_epss_scores(cve_ids)`**
@@ -63,7 +63,7 @@
 
 ---
 
-### `scanner/layers.py` - Layer Attribution
+### `phishnet/layers.py` - Layer Attribution
 * **`get_docker_client()`**
   Creates a Docker SDK client via `docker.from_env()` and pings the daemon. Raises `RuntimeError` with an actionable message if the daemon is unreachable.
 * **`get_layer_metadata(image_name)`**
@@ -75,8 +75,8 @@
 
 ---
 
-### `scanner/remediate.py` - Auto-Remediation (NEW)
-*This module is the "wow factor" feature - `scanner fix nginx:1.14` generates a hardened Dockerfile in one command.*
+### `phishnet/remediate.py` - Auto-Remediation (NEW)
+*This module is the "wow factor" feature - `phishnet fix nginx:1.14` generates a hardened Dockerfile in one command.*
 * **Data structures**
   - `DockerfileLine` - a single parsed Dockerfile instruction with its original text, instruction keyword, arguments, and a modification flag used to annotate patched lines in the output.
   - `RemediationPlan` - the complete plan: original image, upgraded base, per-manager package pins (apt, apk, pip, npm), security hardening rules, and counts of fixed vs unfixable CVEs.
@@ -99,11 +99,13 @@
 
 ---
 
-### `scanner/main.py` - CLI Entry Point
+### `phishnet/main.py` - CLI Entry Point
 * **scan command**
   Runs the full pipeline (integrity → SBOM → CVE matching → scoring → layer attribution) with Rich spinner progress indicators. Outputs a terminal report or JSON depending on `--output`. The priority-based CI gate fires after layer attribution; the legacy `--fail-on` gate fires afterward for backwards compatibility.
 * **integrity command**
   Runs `integrity.py` checks only - no SBOM or CVE scan. Useful for fast pre-pull validation in scripts.
+* **scan-dir command**
+  Scans source dependency manifests and lockfiles with Trivy filesystem mode, then applies the same CVE parsing, EPSS/KEV scoring, reporting, and CI gates. It skips image integrity checks and Docker-layer attribution.
 * **fix command (NEW)**
   Runs the full scan pipeline to collect CVEs and layer metadata, then invokes `remediate.build_remediation_plan()` and `remediate.generate_patched_dockerfile()`. Displays the remediation report via `print_remediation_report()` and optionally saves to disk via `save_patched_dockerfile()`.
 

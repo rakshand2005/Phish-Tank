@@ -6,7 +6,7 @@
 **Phish Net** is a supply-chain security tool for Docker container images. It occupies a privileged position in a CI/CD pipeline: it has access to the Docker socket, makes outbound network calls to vulnerability databases, and its output directly gates production deployments. This threat model identifies six specific supply-chain attack scenarios the tool defends against, maps each to MITRE ATT&CK techniques, details the implemented defenses, and documents residual risks and recommendations.
 
 ### Scope
-- The Phish Net scanner CLI and all modules in `scanner/` including the new `remediate.py`.
+- The Phish Net CLI and all modules in `phishnet/` including `remediate.py`.
 - External data dependencies: Docker Hub API, Trivy vulnerability DB, EPSS API (FIRST.org), CISA KEV feed, Cosign/Sigstore infrastructure.
 - The execution environment: CI runner or developer workstation with Docker socket access.
 - **Out of scope:** vulnerabilities in the scanned images themselves (that is the tool's output, not its attack surface).
@@ -66,7 +66,7 @@
   - Every CVE is enriched with EPSS (statistical probability of exploitation in the next 30 days) and the CISA KEV flag (currently being actively exploited by nation-state actors or ransomware).
   - A composite `priority_score` (0-10) replaces reliance on theoretical CVSS scores alone, blocking only CVEs that represent real and immediate risk.
   - Layer attribution identifies which specific Dockerfile instruction introduced each vulnerable package, enabling targeted fixes.
-  - The new `scanner fix` command auto-generates a patched Dockerfile with base image upgrades and pinned package versions.
+  - The `phishnet fix` command auto-generates a patched Dockerfile with base image upgrades and pinned package versions.
 
 #### Scenario 6 - Unsigned Publisher Artifacts
 - **Attack:** An attacker uploads an image masquerading as a legitimate publisher. Because the image is unsigned, there is no cryptographic proof of publisher identity.
@@ -77,12 +77,12 @@
 
 ---
 
-### Additional Attack Surface: The Scanner Itself
+### Additional Attack Surface: Phish Net Itself
 
 #### Docker Socket Exposure
-The scanner mounts `/var/run/docker.sock`, which grants root-equivalent access to the host.
+Phish Net mounts `/var/run/docker.sock`, which grants root-equivalent access to the host.
 - **Implemented mitigations:** only `docker.images.pull()` and `docker.api.inspect_image()` are called - no containers are started or modified.
-- **Recommendation:** add `USER scanner` (non-root) to the Dockerfile.
+- **Recommendation:** add a dedicated non-root `USER phishnet` to the Dockerfile.
 
 #### Compromised EPSS or KEV Feed
 A MITM of the FIRST.org EPSS API or CISA KEV feed could suppress exploit scores.
@@ -99,10 +99,10 @@ An insider could raise `GATE_THRESHOLD` to 10.0 so the CI gate never fires.
 
 | Priority | Recommendation | Module |
 |----------|----------------|--------|
-| **HIGH** | Add `USER scanner` (non-root) to Dockerfile | `Dockerfile` |
+| **HIGH** | Add a dedicated non-root `USER phishnet` to Dockerfile | `Dockerfile` |
 | **HIGH** | Enforce HTTPS certificate pinning for EPSS and KEV URLs | `scoring.py` |
 | **MEDIUM** | Add startup assertion: weights sum to 1.0 and `0 < GATE_THRESHOLD <= 10` | `scoring.py` |
 | **MEDIUM** | Support digest-only image references in CI (reject mutable tags by default) | `integrity.py` |
-| **MEDIUM** | Publish SLSA provenance attestation for the scanner image itself | CI / `Dockerfile` |
+| **MEDIUM** | Publish SLSA provenance attestation for the Phish Net image itself | CI / `Dockerfile` |
 | **LOW** | Implement content-hash verification for downloaded Trivy DB | `matcher.py` |
 | **LOW** | Add retry with exponential back-off for EPSS/KEV API calls | `scoring.py` |

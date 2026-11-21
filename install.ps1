@@ -20,7 +20,7 @@ if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-Write-Host "📦 Pulling scanner image from GitHub Container Registry..." -ForegroundColor Yellow
+Write-Host "📦 Pulling Phish Net image from GitHub Container Registry..." -ForegroundColor Yellow
 docker pull $Image
 
 Write-Host ""
@@ -31,7 +31,8 @@ $FunctionDef = @"
 
 # Phish Net
 function phishnet {
-    docker run --rm -v //var/run/docker.sock:/var/run/docker.sock `$Image `@args
+    `$workspace = (Get-Location).Path
+    docker run --rm --mount "type=bind,source=`$workspace,target=/workspace" -w /workspace -v //var/run/docker.sock:/var/run/docker.sock $Image `@args
 }
 "@
 
@@ -56,6 +57,7 @@ Write-Host "✅ Installation complete!" -ForegroundColor Green
 Write-Host ""
 Write-Host "   Usage:" -ForegroundColor White
 Write-Host "     phishnet scan nginx:1.14"
+Write-Host "     phishnet scan-dir ."
 Write-Host "     phishnet scan nginx:1.14 --output json"
 Write-Host "     phishnet scan nginx:1.14 --fail-on CRITICAL"
 Write-Host "     phishnet integrity nginx:1.14"
