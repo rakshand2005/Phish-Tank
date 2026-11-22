@@ -110,7 +110,7 @@ def update_db() -> bool:
     logger.info("Updating Trivy vulnerability database...")
     try:
         result = subprocess.run(
-            ["trivy", "image", "--download-db-only"],
+            ["trivy", "image", "--download-db-only", "--db-repository", "ghcr.io/aquasecurity/trivy-db:2"],
             capture_output=True,
             text=True,
             timeout=300,

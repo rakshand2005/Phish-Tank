@@ -327,21 +327,60 @@ def fetch_registry_digest(image_name: str, timeout: int = 8) -> Optional[str]:
     return None
 
 
+def _find_highest_version_tag(tags: list[str]) -> Optional[str]:
+    """Find the highest semantic release version among tag names."""
+    try:
+        from packaging.version import parse as _pv, InvalidVersion
+    except ImportError:
+        _pv = None
+        InvalidVersion = Exception
+
+    scored_tags = []
+    for tag in tags:
+        m = re.match(r"^v?(\d+(?:\.\d+)+)", tag)
+        if not m:
+            continue
+        v_str = m.group(1)
+        if _pv is not None:
+            try:
+                v = _pv(v_str)
+                if not getattr(v, "is_prerelease", False):
+                    scored_tags.append((v, tag))
+                continue
+            except InvalidVersion:
+                pass
+        try:
+            parts = tuple(int(x) for x in v_str.split("."))
+            scored_tags.append((parts, tag))
+        except ValueError:
+            pass
+
+    if scored_tags:
+        scored_tags.sort(key=lambda item: item[0])
+        return scored_tags[-1][1]
+    return None
+
+
 def fetch_latest_tag_from_registry(image_name: str, timeout: int = 6) -> str:
     """
     Fetch the latest tag for an image repository across any registry.
+    Prefers the highest semantic release version when available.
     """
     ref = parse_image_reference(image_name)
 
     # 1. Docker Hub API
     if ref.is_docker_hub:
-        url = f"https://hub.docker.com/v2/repositories/{ref.repository}/tags/?page_size=1"
+        url = f"https://hub.docker.com/v2/repositories/{ref.repository}/tags/?page_size=50"
         try:
             res = requests.get(url, timeout=timeout)
             if res.status_code == 200:
                 results = res.json().get("results", [])
-                if results:
-                    return results[0].get("name", "unknown")
+                tag_names = [t.get("name", "") for t in results if t.get("name")]
+                best_tag = _find_highest_version_tag(tag_names)
+                if best_tag:
+                    return best_tag
+                if tag_names:
+                    return tag_names[0]
         except requests.RequestException:
             pass
 
@@ -353,7 +392,9 @@ def fetch_latest_tag_from_registry(image_name: str, timeout: int = 6) -> str:
         if res.status_code == 200:
             tags = res.json().get("tags", [])
             if tags:
-                # Return newest or latest tag
+                best_tag = _find_highest_version_tag(tags)
+                if best_tag:
+                    return best_tag
                 if "latest" in tags:
                     return "latest"
                 return tags[-1]

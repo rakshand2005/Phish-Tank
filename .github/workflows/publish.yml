@@ -78,9 +78,20 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run Phish Net on nginx:1.14 (should find vulnerabilities)
+        shell: bash
         run: |
+          set +e
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
-            scan nginx:1.14 --output json | head -100
+            scan nginx:1.14 --output json > scan_output.json
+          SCAN_EXIT=$?
+          set -e
+          # Exit code 1 is expected from the CI gate blocking on known CVEs in nginx:1.14
+          if [ $SCAN_EXIT -ne 0 ] && [ $SCAN_EXIT -ne 1 ]; then
+            echo "❌ Scanner crashed with unexpected exit code $SCAN_EXIT"
+            exit $SCAN_EXIT
+          fi
+          head -n 100 scan_output.json
+          python3 -c "import json; data=json.load(open('scan_output.json')); assert len(data.get('cves', [])) > 0, 'No CVEs found in known vulnerable image'"
           echo "✅ Smoke test passed"

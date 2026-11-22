@@ -97,7 +97,7 @@ def _resolve_local_digest(image_name: str) -> Optional[str]:
     """
     try:
         result = subprocess.run(
-            ["docker", "inspect", "--format", "{{index .RepoDigests 0}}", image_name],
+            ["docker", "inspect", "--format", "{{json .RepoDigests}}", image_name],
             capture_output=True, text=True, timeout=10,
         )
         if result.returncode == 0:

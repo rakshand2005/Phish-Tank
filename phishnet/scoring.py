@@ -212,24 +212,74 @@ def fetch_latest_version_from_registry(image_name: str) -> str:
     return fetch_latest_tag_from_registry(image_name)
 
 
+import re
+try:
+    from packaging.version import parse as _parse_version, InvalidVersion
+except ImportError:
+    _parse_version = None
+    InvalidVersion = Exception
+
+
+def _extract_semver(tag: str):
+    """
+    Extract a semantic version from an image tag for meaningful comparison.
+    Returns None for non-version or floating tags (e.g. latest, alpine, slim, master).
+    """
+    if not tag:
+        return None
+    normalized = tag.strip().lower()
+    if normalized in ("latest", "stable", "edge", "nightly", "master", "main", "dev", "slim", "alpine"):
+        return None
+    m = re.match(r"^v?(\d+(?:\.\d+)+)", normalized)
+    if not m:
+        return None
+    ver_str = m.group(1)
+    if _parse_version is not None:
+        try:
+            return _parse_version(ver_str)
+        except InvalidVersion:
+            pass
+    try:
+        return tuple(int(x) for x in ver_str.split("."))
+    except ValueError:
+        return None
+
+
 def _version_outdated_multiplier(installed_version: str, image_name: str) -> float:
     """
     Returns a score multiplier based on how outdated the installed version is.
 
-    Compares the installed_version against the latest tag fetched from
-    the registry. If they differ, applies a penalty multiplier:
-        - Same version or unknown   →  1.0  (no change)
-        - Version mismatch detected →  1.25 (25 % boost; unpatched vector)
+    Compares the installed_version against the latest version tag from
+    the registry using semantic version comparison:
+        - Non-version tags (latest, alpine, etc.) → 1.0 (no penalty)
+        - Installed version >= latest or unknown  → 1.0 (no penalty)
+        - Installed version < latest              → 1.25 (25% patch penalty)
     """
-    latest = fetch_latest_version_from_registry(image_name)
-    if latest == "unknown":
+    installed_semver = _extract_semver(installed_version)
+    if installed_semver is None:
+        logger.debug(
+            "Installed tag '%s' is not a comparable semantic version; skipping outdated multiplier.",
+            installed_version,
+        )
+        return 1.0
+
+    latest_tag = fetch_latest_version_from_registry(image_name)
+    if not latest_tag or latest_tag == "unknown":
         logger.debug("Could not determine latest version for '%s'; skipping multiplier.", image_name)
         return 1.0
 
-    if latest != installed_version:
+    latest_semver = _extract_semver(latest_tag)
+    if latest_semver is None:
+        logger.debug(
+            "Registry tag '%s' is not a comparable semantic version; skipping outdated multiplier.",
+            latest_tag,
+        )
+        return 1.0
+
+    if installed_semver < latest_semver:
         logger.info(
-            "Version outdated for '%s': installed=%s, latest=%s — applying patch multiplier.",
-            image_name, installed_version, latest,
+            "Version outdated for '%s': installed=%s (< latest=%s) — applying patch multiplier.",
+            image_name, installed_version, latest_tag,
         )
         return 1.25
 
@@ -256,7 +306,7 @@ def _check_digest_drift(image_name: str) -> bool:
     def _local_digest(name: str) -> Optional[str]:
         try:
             r = subprocess.run(
-                ["docker", "inspect", "--format", "{{index .RepoDigests 0}}", name],
+                ["docker", "inspect", "--format", "{{json .RepoDigests}}", name],
                 capture_output=True, text=True, timeout=10,
             )
             if r.returncode == 0:
@@ -276,9 +326,6 @@ def _check_digest_drift(image_name: str) -> bool:
             "SCORING: digest drift detected for '%s' — local=%s registry=%s",
             image_name, local, registry,
         )
-
-    _digest_cache[image_name] = drifted
-    return drifted
 
     _digest_cache[image_name] = drifted
     return drifted
